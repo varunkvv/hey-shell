@@ -80,14 +80,18 @@ a hand-rolled verb list / regex would be a worse copy of that, and it's kubectl/
 
 ### keys
 
-| key | where | does |
-|---|---|---|
-| enter | prompt | send. empty exits |
-| up / down | prompt | past requests |
-| esc | running | stop the run |
-| o | running / done | expand output of the selected step |
-| enter / e / esc | approval | run / edit / skip |
-| tab | done | put the final command (or a combined script) in the zsh buffer and exit. also `print -s` into history |
+the ui was redesigned after the mvp (the plan is plans/2026-11-16-hey-ui-redesign.md in the combo folder). the keys, by mode:
+
+| mode | keys |
+|---|---|
+| prompt | type, enter sends (empty quits), up / down history, tab on empty puts the reuse command in zsh, esc browses (quits if nothing ran) |
+| browse | up / down select, enter open or close, tab puts the selected step in zsh, esc back |
+| running | up / down select, enter open or close, esc stop |
+| approval | enter run (after 400ms), e edit, esc skip |
+| question | up / down choose, enter pick, esc skip |
+| everywhere | ctrl-t mouse on / off, pgup / pgdn scroll, ctrl-c |
+
+the old `o` key is gone (it also typed an `o`). copying is by clicking the copy links. the reuse command is a fenced block the model ends its answer with (prompt.md), falling back to the last successful step. when hey stops and you are not looking, it rings the bell and posts a macos notification.
 
 ### footer
 

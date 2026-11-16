@@ -1,4 +1,4 @@
-# source this file from ~/.zshrc. run `hey <request>` or press ctrl-x a (map cmd+opt+a to it, see README)
+# source this file from ~/.zshrc. run `hey <request>` or press ctrl-x a (needs zle, see README)
 
 _HEY_DIR="${${(%):-%x}:A:h:h}"
 
