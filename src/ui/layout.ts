@@ -26,6 +26,8 @@ export type Step = {
   startedAt: number;
   endedAt?: number;
   expanded: boolean;
+  // ran with no card because auto-approve was on when it started
+  auto?: boolean;
 };
 
 export type Turn = {
@@ -41,7 +43,7 @@ export type Turn = {
 };
 
 export type Sel = { kind: 'step'; id: string } | { kind: 'fold'; turn: number };
-export type KeyName = 'enter' | 'esc' | 'tab';
+export type KeyName = 'enter' | 'esc' | 'tab' | 'up' | 'down';
 
 export type Action =
   | { t: 'step'; id: string }
@@ -54,7 +56,9 @@ export type Action =
   | { t: 'back' }
   | { t: 'runEdited' }
   | { t: 'option'; i: number }
-  | { t: 'chip'; kind: 'mode' | 'model' }
+  | { t: 'chip'; kind: 'model' }
+  | { t: 'auto' }
+  | { t: 'newline' }
   | { t: 'prompt'; base: number }
   | { t: 'editAt'; start: number; end: number; x: number }
   | { t: 'page'; dir: 1 | -1 }
@@ -62,8 +66,9 @@ export type Action =
   | { t: 'tab' };
 
 // colors are tokens, resolved to a palette in theme.ts. tint is a faint wash of the terminal's own background
-export type Tone = 'accent' | 'ok' | 'err' | 'flag' | 'str' | 'var' | 'value' | 'badgeText';
-export type Style = { b?: boolean; d?: boolean; i?: boolean; u?: boolean; inv?: boolean; fg?: Tone; bg?: 'badge' | 'accent' | 'err' | 'tint' };
+export type Tone = 'accent' | 'ok' | 'err' | 'flag' | 'str' | 'var' | 'value' | 'amber' | 'badgeText';
+// tint is the panel wash. inset is the command field inside it, chip a button on the panel, chipBare a button on the plain canvas
+export type Style = { b?: boolean; d?: boolean; i?: boolean; u?: boolean; inv?: boolean; fg?: Tone; bg?: 'badge' | 'accent' | 'err' | 'tint' | 'inset' | 'chip' | 'chipBare' | 'amberTint' };
 export type Span = { t: string; s: Style };
 export type Hit = { x0: number; x1: number; action: Action };
 type Meta = { step: string; part: 'head' | 'cmd' | 'action' | 'out'; idx?: number };
@@ -75,10 +80,12 @@ class Line {
   col = 0;
   row?: Action;
   meta?: Meta;
+  // the wash behind anything added without a background of its own (the panel rows set it)
+  fill?: Style['bg'];
   add(t: string, s: Style = {}, action?: Action) {
     if (!t) return this;
     const w = cells(t);
-    this.spans.push({ t, s });
+    this.spans.push({ t, s: this.fill && !s.bg ? { ...s, bg: this.fill } : s });
     if (action) this.hits.push({ x0: this.col, x1: this.col + w, action });
     this.col += w;
     return this;
@@ -94,9 +101,10 @@ const line = () => new Line();
 const blank = (): Row => line().done();
 
 export type Card =
-  | { kind: 'approval'; description?: string; command: string; scroll: number }
+  // done: the card was just answered and its panel is held for a moment so the log does not jump. it is inert
+  | { kind: 'approval'; description?: string; command: string; scroll: number; done?: 'running' | 'skipped' }
   | { kind: 'edit'; description?: string; original: string; buffer: Edit }
-  | { kind: 'question'; n: number; total: number; question: string; options: { label: string; description: string }[]; index: number; typing?: Edit }
+  | { kind: 'question'; n: number; total: number; question: string; options: { label: string; description: string }[]; index: number; typing?: Edit; done?: 'answered' | 'skipped' }
   | { kind: 'menu'; title: string; options: { label: string; description: string; current: boolean; danger: boolean }[]; index: number };
 
 export type Mode = 'prompt' | 'browse' | 'running' | 'approval' | 'edit' | 'question' | 'menu';
@@ -113,10 +121,17 @@ export type View = {
   reveal: boolean;
   draft: Edit;
   card?: Card;
-  armed: boolean;
+  // how far the 400ms input guard has filled, 0..1. a card's actions only work at 1
+  guard: number;
+  // a key or click was swallowed by the guard a moment ago
+  refused: boolean;
+  // ms since the panel started being held (card.done), for the one tick flash of the run pill
+  holdAge: number;
+  // the dock keeps at least this many rows (the collapse after a held panel)
+  dockMin: number;
   flash?: { text: string; step?: string; what?: string };
   mouseOff: boolean;
-  permission: string;
+  auto: boolean;
   model: string;
   newBelow?: boolean;
   cwd?: string;
@@ -149,7 +164,6 @@ export function selectables(turns: Turn[]): Sel[] {
   return out;
 }
 
-const modeLabel = (m: string) => (m === 'bypassPermissions' ? 'bypass' : m === 'acceptEdits' ? 'accept edits' : m);
 const secs = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
 const n = (x: number) => x.toLocaleString('en-US');
 const plural = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
@@ -190,7 +204,9 @@ function stepRows(v: View, s: Step, cw: number): Row[] {
   const head = line();
   head.meta = { step: s.id, part: 'head' };
   head.row = { t: 'step', id: s.id };
-  head.add(sel || s.expanded ? (s.expanded ? '▾' : '▸') : ' ', sel ? { fg: 'accent' } : { d: true }).add(' ').add(g.t, g.s).add(' ');
+  // col 0 is the fold mark when the step is selected or open, and a dim amber » when it ran without a card
+  const mark = sel || s.expanded ? (s.expanded ? '▾' : '▸') : s.auto ? '»' : ' ';
+  head.add(mark, sel ? { fg: 'accent' } : s.auto && mark === '»' ? { fg: 'amber', d: true } : { d: true }).add(' ').add(g.t, g.s).add(' ');
   for (const sp of body) head.add(sp.t, sp.s);
   if (showResult) head.to(re - cells(r.text)).add(r.text, r.style);
   out.push(head.done());
@@ -216,6 +232,7 @@ function stepRows(v: View, s: Step, cw: number): Row[] {
     a.add(copied('output') ? 'copied ✓' : 'copy output', copied('output') ? { fg: 'ok' } : { u: true, fg: 'accent' }, { t: 'copy', what: 'output', step: s.id });
     a.add('  ·  ', { d: true });
     a.add('collapse', { u: true, fg: 'accent' }, { t: 'step', id: s.id });
+    if (s.auto) a.add('  ·  ', { d: true }).add('auto-approved', { d: true, i: true });
     out.push(tagged(a, 'action'));
     if (s.total > s.output.length) out.push(tagged(line().to(6).add(`last ${n(s.output.length)} of ${n(s.total)}`, { d: true, i: true }), 'out'));
     if (!s.output.length) out.push(tagged(line().to(6).add('no output', { d: true, i: true }), 'out'));
@@ -326,65 +343,102 @@ function buildLog(v: View, cw: number): Row[] {
   return out;
 }
 
-const rule = (w: number, badge?: string, tone: 'badge' | 'accent' = 'badge') => {
+// the line above the dock. amber and labelled while auto-approve is on
+const rule = (w: number, badge?: string, tone: 'badge' | 'accent' = 'badge', auto = false) => {
+  if (auto && !badge) {
+    const label = ' auto-approve on ';
+    return line().add('──', { fg: 'amber', d: true }).add(label, { fg: 'amber', b: true }).add('─'.repeat(Math.max(0, w - 2 - cells(label))), { fg: 'amber', d: true }).done();
+  }
   const l = line().add('──', { d: true });
   if (badge) l.add(` ${badge} `, { b: true, fg: 'badgeText', bg: tone }).add('─'.repeat(Math.max(0, w - 4 - cells(badge))), { d: true });
   else l.add('─'.repeat(Math.max(0, w - 2)), { d: true });
   return l.done();
 };
 
-type Hint = { key: string; label: string; action?: Action };
+// a footer hint. `pair` is for the two arrows, each cell is its own click target
+type Hint = { key: string; label: string; action?: Action; pair?: [Action, Action] };
 
+const TOGGLE_W = 'shift-tab'.length + 1 + ' ○ auto-approve off '.length;
+
+// cwd on the left, then the transient badges. on the right the hints, the model chip and the auto-approve toggle, which is always
+// the last thing on the row and the same width on and off. when the row is short the hints go first, then the model chip, then cwd is cut from the left
 function statusRow(v: View, w: number, hints: Hint[]): Row {
   const badges: { text: string; style: Style; action?: Action }[] = [];
-  // the mode and model chips open their menu while nothing is running and no card is up
-  const pickable = v.mode === 'prompt' || v.mode === 'browse' || v.mode === 'menu';
-  const chip = (kind: 'mode' | 'model') => (pickable ? ({ t: 'chip', kind } as const) : undefined);
-  const p = v.permission;
-  if (p === 'default') badges.push({ text: p, style: { d: true, u: pickable }, action: chip('mode') });
-  else badges.push({ text: ` ${modeLabel(p)} `, style: { b: true, fg: 'badgeText', bg: p === 'bypassPermissions' ? 'err' : 'badge' }, action: chip('mode') });
-  badges.push({ text: v.model, style: { d: true, u: pickable }, action: chip('model') });
   if (v.flash) badges.push({ text: v.flash.text, style: { fg: 'ok' } });
   if (v.newBelow) badges.push({ text: 'new below ↓', style: { b: true, u: true, fg: 'accent' }, action: { t: 'bottom' } });
   if (v.mouseOff) badges.push({ text: ' mouse off  ctrl-t to turn on ', style: { inv: true } });
   const badgeW = badges.reduce((a, b) => a + cells(b.text) + 2, 0);
-  const hintW = (hs: Hint[]) => hs.reduce((a, h, i) => a + cells(h.key) + 1 + cells(h.label) + (i ? 3 : 0), 0);
+  // the model chip opens its menu while nothing is running and no card is up
+  const pickable = v.mode === 'prompt' || v.mode === 'browse' || v.mode === 'menu';
+  const hintW = (hs: Hint[]) => hs.reduce((a, h, i) => a + cells(h.key) + 1 + cells(h.label) + (i ? 2 : 0), 0);
   const cwd = v.cwd ?? shortCwd(process.cwd());
   const shown = [...hints];
-  while (shown.length && cells(cwd) > w - hintW(shown) - 2 - badgeW && w - hintW(shown) - 2 - badgeW < Math.min(cells(cwd), 12)) shown.pop();
+  let showModel = true;
+  const rightW = () => (shown.length ? hintW(shown) : 0) + (shown.length && showModel ? 2 : 0) + (showModel ? cells(v.model) : 0) + (shown.length || showModel ? 3 : 0) + TOGGLE_W;
+  const roomFor = () => w - 1 - rightW() - 2 - badgeW;
+  while (roomFor() < Math.min(cells(cwd), 12)) {
+    if (shown.length) shown.pop();
+    else if (showModel) showModel = false;
+    else break;
+  }
   const l = line();
-  const hw = hintW(shown) + (shown.length ? 1 : 0);
-  l.add(clipStart(cwd, Math.max(1, w - hw - badgeW - 1)), { d: true, i: true });
+  l.add(clipStart(cwd, Math.max(1, roomFor())), { d: true, i: true });
   for (const b of badges) l.add('  ').add(b.text, b.style, b.action);
-  l.to(w - hintW(shown) - 1);
+  l.to(w - 1 - rightW());
   shown.forEach((h, i) => {
-    if (i) l.add('   ');
+    if (i) l.add('  ');
     const x0 = l.col;
     l.add(h.key, { b: true }).add(' ').add(h.label, { d: true });
-    if (h.action) l.hits.push({ x0, x1: l.col, action: h.action });
+    if (h.pair) {
+      l.hits.push({ x0, x1: x0 + 1, action: h.pair[0] }, { x0: x0 + 1, x1: x0 + 2, action: h.pair[1] });
+    } else if (h.action) l.hits.push({ x0, x1: l.col, action: h.action });
   });
+  if (showModel) {
+    if (shown.length) l.add('  ');
+    l.add(v.model, { d: true, u: pickable }, pickable ? { t: 'chip', kind: 'model' } : undefined);
+  }
+  if (shown.length || showModel) l.add('   ');
+  const x0 = l.col;
+  l.add('shift-tab', { d: true }).add(' ');
+  l.add(` ${v.auto ? '●' : '○'} auto-approve ${v.auto ? 'on ' : 'off'} `, v.auto ? { fg: 'amber', b: true, bg: 'amberTint' } : { d: true, bg: 'chipBare' });
+  l.hits.push({ x0, x1: l.col, action: { t: 'auto' } });
   return l.done();
 }
 
 const key = (k: KeyName, label: string, kk: string = k): Hint => ({ key: kk, label, action: { t: 'key', key: k } });
+const arrows = (label: string): Hint => ({ key: '↑↓', label, pair: [{ t: 'key', key: 'up' }, { t: 'key', key: 'down' }] });
 
-type Tier = 'primary' | 'secondary' | 'off';
+// a button is a run of cells on a wash. the first `fill` share of the cells (0..1) is drawn lit, the rest dim. a plain chip is fill 0 or 1.
+// the primary one fills left to right while the input guard counts down
+type Look = { on: Style; off: Style };
+const OFF: Style = { bg: 'chip', d: true, i: true };
+const PRIMARY: Look = { on: { fg: 'badgeText', bg: 'accent' }, off: OFF };
+const NEUTRAL: Look = { on: { bg: 'chip' }, off: OFF };
+const AMBER: Look = { on: { fg: 'amber', bg: 'amberTint' }, off: OFF };
 
-// primary is a filled pill, secondary a dim bracket with a plain label, off is the same bracket all dim (guard still closed)
-function button(l: Line, label: string, hint: string, tier: Tier, action?: Action) {
+function button(l: Line, parts: [string, Style?][], look: Look, fill: number, action?: Action) {
   const x0 = l.col;
-  if (tier === 'primary') {
-    l.add(' ', { bg: 'accent' }).add(label, { b: true, fg: 'badgeText', bg: 'accent' });
-    if (hint) l.add('  ', { bg: 'accent' }).add(hint, { fg: 'badgeText', bg: 'accent' });
-    l.add(' ', { bg: 'accent' });
-  } else {
-    const dim = tier === 'off';
-    l.add('[ ', { d: true }).add(label, dim ? { d: true, i: true } : {});
-    if (hint) l.add('  ').add(hint, { d: true });
-    l.add(' ]', { d: true });
+  const total = parts.reduce((a, [t]) => a + cells(t), 0);
+  const k = Math.round(total * fill);
+  let at = 0;
+  for (const [t, s = {}] of parts) {
+    let lit = '';
+    let rest = '';
+    for (const ch of [...t]) {
+      if (at < k) lit += ch;
+      else rest += ch;
+      at += cells(ch);
+    }
+    if (lit) l.add(lit, { ...look.on, ...s });
+    // dim text stays dim on the unlit part, so a half filled button still reads as one thing
+    if (rest) l.add(rest, { ...look.off, b: s.b });
   }
   if (action) l.hits.push({ x0, x1: l.col, action });
 }
+
+// ' run  enter ' is always 12 cells wide whatever the hint says, so the pill never changes size
+const pillParts = (label: string, hint: string, width = 5): [string, Style?][] => [[' '], [label, { b: true }], ['  '], [hint.padEnd(width)], [' ']];
+const chipParts = (label: string, hint: string): [string, Style?][] => [[' '], [label], ['  '], [hint, { d: true }], [' ']];
 
 function promptRow(v: View, w: number, focused: boolean, empty: boolean): Row {
   const l = line();
@@ -415,7 +469,7 @@ function promptRow(v: View, w: number, focused: boolean, empty: boolean): Row {
 }
 
 function dockPrompt(v: View, w: number): Row[] {
-  const rows = [rule(w)];
+  const rows = [rule(w, undefined, 'badge', v.auto)];
   const focused = v.mode === 'prompt';
   rows.push(promptRow(v, w, focused, !v.turns.length));
   const hints: Hint[] = [];
@@ -423,7 +477,7 @@ function dockPrompt(v: View, w: number): Row[] {
   else if (v.mode === 'browse') {
     const sel = v.selected;
     const open = sel?.kind === 'step' && v.turns.some((t) => t.steps.some((s) => s.id === sel.id && s.expanded));
-    hints.push({ key: '↑↓', label: 'select' });
+    hints.push(arrows('select'));
     if (sel) hints.push(key('enter', open ? 'collapse' : 'open'));
     if (sel?.kind === 'step') hints.push(key('tab', 'to shell'));
     hints.push(key('esc', 'back'));
@@ -442,29 +496,82 @@ function dockRunning(v: View, w: number): Row[] {
   const running = line().to(2).add(SPINNER[v.frame % SPINNER.length], { fg: 'accent' }).add(' ').add(`${count ? `running ${plural(count, 'step')}` : 'working'} · ${secs(v.now - (t?.startedAt ?? v.now))}`, { d: true, i: true }).done();
   const sel = v.selected?.kind === 'step' && t?.steps.find((s) => s.id === (v.selected as { id: string }).id);
   const hints: Hint[] = [key('esc', 'stop')];
-  if (count) hints.push({ key: '↑↓', label: 'select' });
+  if (count) hints.push(arrows('select'));
   if (sel) hints.push(key('enter', sel.expanded ? 'collapse' : 'open'));
-  return [rule(w), running, statusRow(v, w, hints)];
+  return [rule(w, undefined, 'badge', v.auto), running, statusRow(v, w, hints)];
 }
 
 type Dock = { rows: Row[]; cmdMax: number };
 
+// the card is a panel inset 2 cols from each side: the bar is col 2, content runs from col 4 to col w-4, and the wash to col w-3.
+// from the bottom up the rows are always status, padding, buttons, so the primary button keeps its row and column on every card
+const CX = 4;
+function prow(w: number, bar: Tone, fn?: (l: Line) => void): Row {
+  const l = line().add('  ').add('▌', { fg: bar, bg: 'tint' });
+  l.fill = 'tint';
+  l.add(' ');
+  fn?.(l);
+  l.to(w - 2);
+  return l.done();
+}
+// the darker field inside the panel (the command, the selected option), from the content column to the right edge of the content
+function inset(l: Line, w: number, fn: () => void) {
+  l.fill = 'inset';
+  fn();
+  l.to(w - CX);
+  l.fill = 'tint';
+}
+const badge = (text: string, bg: 'badge' | 'accent' | 'chip'): { text: string; style: Style } => ({
+  text: ` ${text} `,
+  style: bg === 'chip' ? { bg, d: true } : { b: true, fg: 'badgeText', bg },
+});
+// pad, the badge and the headline (wraps under itself, never cut), pad
+function panelHead(w: number, bar: Tone, b: ReturnType<typeof badge>, text: string, style: Style): Row[] {
+  const bw = cells(b.text) + 2;
+  const rows = wrap(text, Math.max(8, w - 2 * CX - bw)).map((rg, i) =>
+    prow(w, bar, (l) => {
+      if (i === 0) l.add(b.text, b.style).add('  ');
+      else l.add(' '.repeat(bw));
+      l.add(text.slice(rg.start, rg.end), style);
+    }),
+  );
+  return [prow(w, bar), ...rows, prow(w, bar)];
+}
+
+// the amber chip, right aligned. it gives up its key hint, then its word, before it would touch the buttons on the left
+function autoChip(l: Line, w: number, look: Look, fill: number, action?: Action) {
+  const R = w - CX;
+  const room = R - l.col - 2;
+  const variants: [string, Style?][][] = [
+    [[' '], ['auto-approve rest'], ['  '], ['shift-tab', { d: true }], [' ']],
+    [[' '], ['auto-approve rest'], [' ']],
+    [[' '], ['auto-approve'], [' ']],
+  ];
+  const parts = variants.find((p) => p.reduce((a, [t]) => a + cells(t), 0) <= room);
+  if (!parts) return;
+  l.to(R - parts.reduce((a, [t]) => a + cells(t), 0));
+  button(l, parts, look, fill, action);
+}
+
 function dockApproval(v: View, w: number, card: Extract<Card, { kind: 'approval' | 'edit' }>): Dock {
   const editing = card.kind === 'edit';
+  const done = card.kind === 'approval' ? card.done : undefined;
   const dirty = editing && card.buffer.text !== card.original;
   const desc = card.description ?? 'run this command';
-  const head: Row[] = [rule(w, editing ? 'edit' : 'approve', editing ? 'accent' : 'badge')];
   const descText = editing && dirty ? `was: ${desc}` : desc;
-  for (const rg of wrap(descText, w - 4)) head.push(line().to(2).add(descText.slice(rg.start, rg.end), editing && dirty ? { d: true, i: true } : { b: true }).done());
-  head.push(blank());
+  const b = done ? badge(done, 'chip') : badge(editing ? 'edit' : 'approve', 'badge');
+  const head = panelHead(w, 'amber', b, descText, editing && dirty ? { d: true, i: true } : { b: true });
   const text = editing ? card.buffer.text : card.command;
-  // the command is never truncated. it wraps with a 4 cell hanging indent, and the region scrolls when it is taller than the screen allows
-  const reserve = editing ? 1 : 0;
-  const ranges = wrap(text, w - 7 - reserve, w - 5 - reserve);
-  const chrome = head.length + 3;
+  // the command is never truncated. it wraps with a hanging indent, and the region scrolls when it is taller than the screen allows.
+  // the first row leaves room for copy, the edit field leaves one cell for the cursor at the end of a row
+  const inner = w - 2 * CX;
+  const first = inner - 3 - (editing ? 1 : 6);
+  const rest = inner - 5 - 1;
+  const ranges = wrap(text, rest, first);
+  const chrome = head.length + 4;
   const cmdMax = Math.max(1, v.rows - chrome - 1);
-  let from = 0;
   const visible = Math.min(ranges.length, cmdMax);
+  let from = 0;
   if (editing) {
     const own = ranges.findIndex((r, i) => card.buffer.cur < (ranges[i + 1]?.start ?? Infinity) || i === ranges.length - 1);
     from = Math.max(0, Math.min(own - visible + 1 + Math.floor(visible / 2), ranges.length - visible));
@@ -473,82 +580,111 @@ function dockApproval(v: View, w: number, card: Extract<Card, { kind: 'approval'
   const body: Row[] = [];
   for (let i = from; i < from + visible; i++) {
     const rg = ranges[i];
-    const l = line().to(2).add(i === 0 ? '$ ' : '    ', i === 0 ? { fg: 'accent', b: true } : { d: true });
-    if (editing) {
-      const c = card.buffer.cur;
-      const owns = c >= rg.start && c < (ranges[i + 1]?.start ?? Infinity) || (i === ranges.length - 1 && c >= rg.start);
-      const x = l.col;
-      if (owns) {
-        const at = Math.min(c, rg.end);
-        const rest = text.slice(at, rg.end);
-        const ch = firstGrapheme(rest);
-        l.add(text.slice(rg.start, at)).add(ch || ' ', { inv: true }).add(rest.slice(ch.length));
-      } else l.add(text.slice(rg.start, rg.end));
-      l.row = { t: 'editAt', start: rg.start, end: rg.end, x };
-    } else for (const sp of sliceSpans(cmdSpans, rg.start, rg.end)) l.add(sp.t, sp.s);
-    body.push(editing ? l.done() : tinted(l, w));
+    let editAt: Action | undefined;
+    const r = prow(w, 'amber', (l) => {
+      inset(l, w, () => {
+        l.add(i === 0 ? ' $ ' : '     ', { d: true });
+        if (editing) {
+          const c = card.buffer.cur;
+          const owns = (c >= rg.start && c < (ranges[i + 1]?.start ?? Infinity)) || (i === ranges.length - 1 && c >= rg.start);
+          const x = l.col;
+          if (owns) {
+            const at = Math.min(c, rg.end);
+            const tail = text.slice(at, rg.end);
+            const ch = firstGrapheme(tail);
+            l.add(text.slice(rg.start, at)).add(ch || ' ', { inv: true }).add(tail.slice(ch.length));
+          } else l.add(text.slice(rg.start, rg.end));
+          editAt = { t: 'editAt', start: rg.start, end: rg.end, x };
+        } else {
+          for (const sp of sliceSpans(cmdSpans, rg.start, rg.end)) l.add(sp.t, done ? { ...sp.s, d: true } : sp.s);
+          if (i === 0 && !done) l.to(w - CX - 5).add('copy', { u: true, fg: 'accent' }, { t: 'copy', what: 'command' });
+        }
+      });
+    });
+    if (editAt) r.row = editAt;
+    body.push(r);
   }
   const seenEnd = from + visible >= ranges.length;
-  const buttons = line().to(2);
-  if (editing) {
-    button(buttons, 'run edited', 'enter', 'primary', { t: 'runEdited' });
-    buttons.add('   ');
-    button(buttons, 'back', 'esc', 'secondary', { t: 'back' });
-    const hint = 'ctrl-j newline';
-    buttons.to(w - cells(hint) - 2).add(hint, { d: true, i: true });
-  } else {
-    const live = v.armed && seenEnd;
-    button(buttons, 'run', 'enter', live ? 'primary' : 'off', live ? { t: 'run' } : undefined);
-    buttons.add('   ');
-    button(buttons, 'edit', 'e', 'secondary', { t: 'edit' });
-    buttons.add('   ');
-    button(buttons, 'skip', 'esc', 'secondary', { t: 'skip' });
-    buttons.to(w - 6).add('copy', { u: true, fg: 'accent' }, { t: 'copy', what: 'command' });
-  }
-  const hints: Hint[] = !editing && !seenEnd ? [{ key: 'pgdn', label: 'more', action: { t: 'page', dir: 1 } }] : [];
-  return { rows: [...head, ...body, blank(), buttons.done(), statusRow(v, w, hints)], cmdMax: Math.max(0, ranges.length - visible) };
+  const lit = v.guard >= 1;
+  const held = done !== undefined;
+  const buttons = prow(w, 'amber', (l) => {
+    if (editing) {
+      button(l, pillParts('run edited', 'enter', 5), PRIMARY, 1, { t: 'runEdited' });
+      l.add('  ');
+      button(l, chipParts('back', 'esc'), NEUTRAL, 1, { t: 'back' });
+      autoChip(l, w, AMBER, 1, { t: 'auto' });
+      return;
+    }
+    // run is dim until the whole command has been on screen, then fills while the guard counts down. a swallowed press says why
+    const flash = done === 'running' && v.holdAge < 100;
+    const hint = held ? (flash ? '✓' : '') : !seenEnd ? 'pgdn' : v.guard < 1 && v.refused ? 'wait…' : 'enter';
+    const fill = flash ? 1 : held || !seenEnd ? 0 : v.guard;
+    button(l, pillParts('run', hint), PRIMARY, fill, held || !seenEnd ? undefined : { t: 'run' });
+    l.add('  ');
+    button(l, chipParts('edit', 'e'), NEUTRAL, lit && !held ? 1 : 0, held ? undefined : { t: 'edit' });
+    l.add('  ');
+    button(l, chipParts('skip', 'esc'), NEUTRAL, lit && !held ? 1 : 0, held ? undefined : { t: 'skip' });
+    autoChip(l, w, AMBER, lit && !held && seenEnd ? 1 : 0, held || !seenEnd ? undefined : { t: 'auto' });
+  });
+  const hints: Hint[] = editing ? [{ key: 'ctrl-j', label: 'newline', action: { t: 'newline' } }] : !seenEnd && !held ? [{ key: 'pgdn', label: 'more', action: { t: 'page', dir: 1 } }] : [];
+  return { rows: [...head, ...body, prow(w, 'amber'), buttons, prow(w, 'amber'), statusRow(v, w, hints)], cmdMax: Math.max(0, ranges.length - visible) };
 }
 
 function dockQuestion(v: View, w: number, c: Extract<Card, { kind: 'question' }>): Row[] {
-  const rows: Row[] = [rule(w, c.total > 1 ? `question ${c.n}/${c.total}` : 'question', 'accent')];
-  for (const rg of wrap(c.question, w - 4)) rows.push(line().to(2).add(c.question.slice(rg.start, rg.end), { b: true }).done());
-  rows.push(blank());
+  const done = c.done;
+  const head = panelHead(w, 'accent', done ? badge(done, 'chip') : badge(c.total > 1 ? `question ${c.n}/${c.total}` : 'question', 'accent'), c.question, { b: true });
+  const rows: Row[] = [...head];
   const labels = [...c.options.map((o) => o.label), 'other'];
   const lw = Math.min(28, Math.max(...labels.map(cells)));
-  const hints: Hint[] = [];
   labels.forEach((label, i) => {
-    const l = line().to(2);
     const on = i === c.index;
     const isOther = i === c.options.length;
-    if (isOther && c.typing) {
-      l.add('❯ ', { fg: 'accent', b: true });
-      const { text, cur } = c.typing;
-      l.add(text.slice(0, cur)).add(text[cur] ?? ' ', { inv: true }).add(text.slice(cur + 1));
-    } else {
+    let hit: Action | undefined;
+    const r = prow(w, 'accent', (l) => {
+      const draw = () => {
+        l.add(' ').add(on ? '❯ ' : '  ', { fg: 'accent', b: true });
+        if (isOther && c.typing) {
+          const { text, cur } = c.typing;
+          l.add(text.slice(0, cur)).add(text[cur] ?? ' ', { inv: true }).add(text.slice(cur + 1));
+          return;
+        }
+        const pad = clip(label, lw) + ' '.repeat(Math.max(0, lw - cells(clip(label, lw))));
+        l.add(pad, on ? { b: true, fg: 'accent' } : {});
+        const d = isOther ? 'type your own answer' : c.options[i].description;
+        l.add('  ').add(clip(d, Math.max(0, w - CX - l.col - 1)), { d: true, i: true });
+      };
       const x0 = l.col;
-      const pad = clip(label, lw) + ' '.repeat(Math.max(0, lw - cells(clip(label, lw))));
-      l.add(on ? '❯ ' : '  ', { fg: 'accent', b: true }).add(pad, on ? { b: true, fg: 'accent' } : {});
-      l.hits.push({ x0, x1: l.col, action: { t: 'option', i } });
-      const d = isOther ? 'type your own answer' : c.options[i].description;
-      l.add('  ').add(clip(d, Math.max(0, w - l.col - 2)), on ? { i: true } : { d: true, i: true });
-    }
-    rows.push(l.done());
+      if (on) inset(l, w, draw);
+      else draw();
+      if (!done && !(isOther && c.typing)) hit = { t: 'option', i };
+      if (hit) l.hits.push({ x0, x1: w - CX, action: hit });
+    });
+    rows.push(r);
   });
-  rows.push(blank());
-  const b = line().to(2);
-  if (c.typing) {
-    button(b, 'send', 'enter', 'primary', { t: 'key', key: 'enter' });
-    b.add('   ');
-    button(b, 'back', 'esc', 'secondary', { t: 'key', key: 'esc' });
-  } else {
-    button(b, 'answer', 'enter', v.armed ? 'primary' : 'off', { t: 'key', key: 'enter' });
-    b.add('   ');
-    button(b, 'skip', 'esc', 'secondary', { t: 'key', key: 'esc' });
-    const hint = '↑↓ choose';
-    b.to(w - cells(hint) - 2).add(hint, { d: true, i: true });
-  }
-  rows.push(b.done());
-  rows.push(statusRow(v, w, hints));
+  rows.push(prow(w, 'accent'));
+  const lit = v.guard >= 1;
+  rows.push(
+    prow(w, 'accent', (l) => {
+      if (c.typing) {
+        button(l, pillParts('send', 'enter'), PRIMARY, 1, { t: 'key', key: 'enter' });
+        l.add('  ');
+        button(l, chipParts('back', 'esc'), NEUTRAL, 1, { t: 'key', key: 'esc' });
+        return;
+      }
+      const hint = done ? '' : v.guard < 1 && v.refused ? 'wait…' : 'enter';
+      button(l, pillParts('answer', hint), PRIMARY, done ? 0 : v.guard, done ? undefined : { t: 'key', key: 'enter' });
+      l.add('  ');
+      button(l, chipParts('skip', 'esc'), NEUTRAL, lit && !done ? 1 : 0, done ? undefined : { t: 'key', key: 'esc' });
+      if (done) return;
+      const x0 = w - CX - '↑↓ choose'.length;
+      if (l.col + 2 <= x0) {
+        l.to(x0).add('↑↓ choose', { d: true, i: true });
+        l.hits.push({ x0, x1: x0 + 1, action: { t: 'key', key: 'up' } }, { x0: x0 + 1, x1: x0 + 2, action: { t: 'key', key: 'down' } });
+      }
+    }),
+  );
+  rows.push(prow(w, 'accent'));
+  rows.push(statusRow(v, w, []));
   return rows;
 }
 
@@ -564,7 +700,7 @@ function dockMenu(v: View, w: number, c: Extract<Card, { kind: 'menu' }>): Row[]
     l.add(' ').add(o.current ? '✓' : ' ', { fg: 'ok' }).add(' ').add(clip(o.description, Math.max(0, w - l.col - 2)), on ? { i: true } : { d: true, i: true });
     rows.push(l.done());
   });
-  rows.push(statusRow(v, w, [{ key: '↑↓', label: 'choose' }, key('enter', 'pick'), key('esc', 'close')]));
+  rows.push(statusRow(v, w, [arrows('choose'), key('enter', 'pick'), key('esc', 'close')]));
   return rows;
 }
 
@@ -582,6 +718,10 @@ export function layout(v0: View): Layout {
     else if (v.card?.kind === 'menu') dock = dockMenu(v, W, v.card);
     else if (v.mode === 'running') dock = dockRunning(v, W);
     else dock = dockPrompt(v, W);
+    // the amber line sits above whatever the dock is. the prompt and running docks draw their own
+    if (v.auto && dock[0] !== undefined && v.card && v.card.kind !== 'menu') dock = [rule(W, undefined, 'badge', true), ...dock];
+    // a held panel collapses in steps, so the log does not jump when no next card comes
+    if (dock.length < v.dockMin) dock = [...Array.from({ length: v.dockMin - dock.length }, blank), ...dock];
     return { dock: dock.length > v.rows ? dock.slice(dock.length - v.rows) : dock, cmdMax };
   };
   const v = v0;

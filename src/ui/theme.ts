@@ -12,6 +12,7 @@ const dark: Palette = {
   str: '#e0af68',
   var: '#73daca',
   value: '#7dcfff',
+  amber: '#e0af68',
   badgeText: '#16161e',
 };
 const light: Palette = {
@@ -22,6 +23,7 @@ const light: Palette = {
   str: '#946200',
   var: '#0e7466',
   value: '#0b6a99',
+  amber: '#946200',
   badgeText: '#ffffff',
 };
 
@@ -36,11 +38,29 @@ const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
 
 export type Props = { color?: string; backgroundColor?: string; bold?: boolean; dimColor?: boolean; italic?: boolean; underline?: boolean; inverse?: boolean };
 
-// a layout style as ink props for this theme. NO_COLOR keeps weight and underline, and turns filled pills into inverse
+// washes of the terminal's own background, for the approval panel. lift moves toward white on a dark terminal and toward black on a light one
+const lift = (bg: number[], light: boolean, t: number) => mix(bg, light ? [0, 0, 0] : [255, 255, 255], t);
+function fill(bg: NonNullable<Style['bg']>, t: Theme, pal: Palette): string | undefined {
+  if (!t.bg) return undefined;
+  const panel = mix(t.bg, rgb(pal.accent), t.light ? 0.07 : 0.09);
+  if (bg === 'tint') return hex(panel);
+  if (bg === 'inset') return hex(t.light ? mix(panel, [255, 255, 255], 0.6) : mix(panel, [0, 0, 0], 0.3));
+  if (bg === 'chip') return hex(lift(panel, t.light, t.light ? 0.07 : 0.12));
+  if (bg === 'chipBare') return hex(lift(t.bg, t.light, t.light ? 0.07 : 0.1));
+  if (bg === 'amberTint') return hex(mix(t.bg, rgb(pal.amber), t.light ? 0.13 : 0.14));
+  return undefined;
+}
+const WASH = new Set(['tint', 'inset', 'chip', 'chipBare', 'amberTint']);
+
+// a layout style as ink props for this theme. NO_COLOR keeps weight and underline, and turns filled pills into inverse.
+// without truecolor (or before the terminal answered) the washes drop: the panel and inset go plain, and buttons (chip, amberTint)
+// fall back to underlined text, so they still read as things to click
 export function props(s: Style, t: Theme): Props {
   const p: Props = { bold: s.b, dimColor: s.d, italic: s.i, underline: s.u, inverse: s.inv };
+  const button = s.bg === 'chip' || s.bg === 'chipBare' || s.bg === 'amberTint';
   if (noColor) {
     if (s.bg === 'badge' || s.bg === 'accent' || s.bg === 'err') p.inverse = true;
+    else if (button) p.underline = true;
     return p;
   }
   const pal = t.light ? light : dark;
@@ -48,7 +68,10 @@ export function props(s: Style, t: Theme): Props {
   if (s.bg === 'badge') p.backgroundColor = t.light ? '#946200' : '#e0af68';
   else if (s.bg === 'accent') p.backgroundColor = pal.accent;
   else if (s.bg === 'err') p.backgroundColor = pal.err;
-  else if (s.bg === 'tint' && truecolor && t.bg) p.backgroundColor = hex(mix(t.bg, rgb(pal.accent), t.light ? 0.07 : 0.09));
+  else if (s.bg && WASH.has(s.bg)) {
+    if (truecolor) p.backgroundColor = fill(s.bg, t, pal);
+    if (button && !p.backgroundColor) p.underline = true;
+  }
   if (s.fg === 'badgeText' && s.bg === 'badge') p.color = t.light ? '#ffffff' : '#16161e';
   return p;
 }
