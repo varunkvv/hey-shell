@@ -41,7 +41,7 @@ ctrl-x a is a zle binding, so it needs zle. in warp, type `hey`.
 - running: up / down select, enter opens or closes, esc stops (ctrl-c stops, a second one quits)
 - approval: enter runs, e edits, esc skips. in edit, enter runs the edited command and ctrl-j adds a line
 - question: up / down choose, enter picks, esc skips
-- shift-tab turns auto-approve on and off, also while a request runs. the `auto-approve` chip in the status row does the same on click
+- shift-tab turns auto-approve on and off, also while a request runs. the `auto-approve` chip in the status row does the same on click. on an approval card, shift-tab (or the card's `auto-approve rest` button) runs that command and turns it on
 - prompt and browse: ctrl-o opens the model menu, so does the `sonnet` chip. up / down + enter or a click picks, esc closes
 - ctrl-t turns mouse reporting off and on, pgup / pgdn scroll. everything except the copy links works from the keyboard
 
@@ -64,7 +64,7 @@ hey loads managed policy (always) and your user settings (`~/.claude/settings.js
 
 how: an in-process PreToolUse hook answers `ask` for every Bash call, so the approval card shows even when your settings allow `Bash` or `Bash(*)`. an `ask` loses to a deny from a rule or a hook, and wins over an allow from one.
 
-auto-approve runs every Bash command with no card (deny rules and hooks still apply). it is off at launch and never saved. the flag or `HEY_AUTO_APPROVE=1` start it on. shift-tab or the status chip flips it at any time, and a flip applies from the next command, also in a request that is already running. a card that is already up stays up. questions always reach you.
+auto-approve runs every Bash command with no card (deny rules and hooks still apply). it is off at launch and never saved. the flag or `HEY_AUTO_APPROVE=1` start it on. shift-tab or the status chip flips it at any time, and a flip applies from the next command, also in a request that is already running. on a card it runs that command and turns it on, and commands already queued behind it run too. it stays on for follow-ups in the same session. questions always reach you.
 
     hey --auto-approve what is using port 3000
     HEY_AUTO_APPROVE=1 hey what is using port 3000
