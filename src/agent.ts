@@ -1,13 +1,15 @@
-import { query, type CanUseTool, type Query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type PermissionMode, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync } from 'node:fs';
+
+// node prints warnings straight onto the screen hey draws on. the sdk raises one on every bypassPermissions run (canUseTool is
+// shadowed), and questions still reach hey there, so none of them are worth showing
+process.removeAllListeners('warning');
 
 const systemPrompt = readFileSync(new URL('../prompt.md', import.meta.url), 'utf8');
 
-// claude code already runs plain read-only commands (ls, cat, grep, wc, find without -delete, git log...)
-// and asks for anything that writes. it does not know kubectl get, so that is all we add.
-// keep the verb first: `Bash(kubectl --context * get:*)` never matches, and `... get *` lets
-// `kubectl --context x label pod y get z` through
-const allowedTools = ['Bash(kubectl get:*)', 'Bash(kubectl config get-contexts:*)'];
+// hey has no command rules of its own. what runs, asks or is blocked comes from the permission mode, the rules and hooks in
+// claude code's managed policy and the user's ~/.claude settings, and claude code's own checks
+export type RunOptions = { permissionMode: PermissionMode; model: string };
 
 export type AgentEvent =
   | { type: 'step'; id: string; command: string; description?: string }
@@ -38,19 +40,23 @@ export function createAgent(canUseTool: CanUseTool) {
 
   return {
     stop: () => void current?.interrupt(),
-    async run(prompt: string, onEvent: (e: AgentEvent) => void) {
+    async run(prompt: string, onEvent: (e: AgentEvent) => void, { permissionMode, model }: RunOptions) {
       const q = (current = query({
         prompt,
         options: {
           systemPrompt,
-          model: 'sonnet',
+          model,
           tools: ['Bash', 'AskUserQuestion'],
-          allowedTools,
-          disallowedTools: ['mcp__claude-in-chrome'],
-          permissionMode: 'default',
+          // `tools` only limits the built-in tools. servers claude code injects itself (claude in chrome, when
+          // ~/.claude.json enables it) ignore strictMcpConfig, so this drops every mcp tool from the model
+          disallowedTools: ['mcp__*'],
+          permissionMode,
+          allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
           canUseTool,
           strictMcpConfig: true,
-          settingSources: [],
+          // managed policy is always read. 'user' adds the user's permission rules, hooks and plugins. project and
+          // local are left out so a repo's own settings and CLAUDE.md do not change what hey does in the current dir
+          settingSources: ['user'],
           resume: sessionId,
         },
       }));

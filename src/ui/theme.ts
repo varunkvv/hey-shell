@@ -40,13 +40,14 @@ export type Props = { color?: string; backgroundColor?: string; bold?: boolean; 
 export function props(s: Style, t: Theme): Props {
   const p: Props = { bold: s.b, dimColor: s.d, italic: s.i, underline: s.u, inverse: s.inv };
   if (noColor) {
-    if (s.bg === 'badge' || s.bg === 'accent') p.inverse = true;
+    if (s.bg === 'badge' || s.bg === 'accent' || s.bg === 'err') p.inverse = true;
     return p;
   }
   const pal = t.light ? light : dark;
   if (s.fg && !(s.fg === 'badgeText' && !s.bg)) p.color = pal[s.fg];
   if (s.bg === 'badge') p.backgroundColor = t.light ? '#946200' : '#e0af68';
   else if (s.bg === 'accent') p.backgroundColor = pal.accent;
+  else if (s.bg === 'err') p.backgroundColor = pal.err;
   else if (s.bg === 'tint' && truecolor && t.bg) p.backgroundColor = hex(mix(t.bg, rgb(pal.accent), t.light ? 0.07 : 0.09));
   if (s.fg === 'badgeText' && s.bg === 'badge') p.color = t.light ? '#ffffff' : '#16161e';
   return p;

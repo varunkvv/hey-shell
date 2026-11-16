@@ -54,6 +54,7 @@ export type Action =
   | { t: 'back' }
   | { t: 'runEdited' }
   | { t: 'option'; i: number }
+  | { t: 'chip'; kind: 'mode' | 'model' }
   | { t: 'prompt'; base: number }
   | { t: 'editAt'; start: number; end: number; x: number }
   | { t: 'page'; dir: 1 | -1 }
@@ -62,7 +63,7 @@ export type Action =
 
 // colors are tokens, resolved to a palette in theme.ts. tint is a faint wash of the terminal's own background
 export type Tone = 'accent' | 'ok' | 'err' | 'flag' | 'str' | 'var' | 'value' | 'badgeText';
-export type Style = { b?: boolean; d?: boolean; i?: boolean; u?: boolean; inv?: boolean; fg?: Tone; bg?: 'badge' | 'accent' | 'tint' };
+export type Style = { b?: boolean; d?: boolean; i?: boolean; u?: boolean; inv?: boolean; fg?: Tone; bg?: 'badge' | 'accent' | 'err' | 'tint' };
 export type Span = { t: string; s: Style };
 export type Hit = { x0: number; x1: number; action: Action };
 type Meta = { step: string; part: 'head' | 'cmd' | 'action' | 'out'; idx?: number };
@@ -95,9 +96,10 @@ const blank = (): Row => line().done();
 export type Card =
   | { kind: 'approval'; description?: string; command: string; scroll: number }
   | { kind: 'edit'; description?: string; original: string; buffer: Edit }
-  | { kind: 'question'; n: number; total: number; question: string; options: { label: string; description: string }[]; index: number; typing?: Edit };
+  | { kind: 'question'; n: number; total: number; question: string; options: { label: string; description: string }[]; index: number; typing?: Edit }
+  | { kind: 'menu'; title: string; options: { label: string; description: string; current: boolean; danger: boolean }[]; index: number };
 
-export type Mode = 'prompt' | 'browse' | 'running' | 'approval' | 'edit' | 'question';
+export type Mode = 'prompt' | 'browse' | 'running' | 'approval' | 'edit' | 'question' | 'menu';
 
 export type View = {
   cols: number;
@@ -114,6 +116,8 @@ export type View = {
   armed: boolean;
   flash?: { text: string; step?: string; what?: string };
   mouseOff: boolean;
+  permission: string;
+  model: string;
   newBelow?: boolean;
   cwd?: string;
   canTab: boolean;
@@ -145,6 +149,7 @@ export function selectables(turns: Turn[]): Sel[] {
   return out;
 }
 
+const modeLabel = (m: string) => (m === 'bypassPermissions' ? 'bypass' : m === 'acceptEdits' ? 'accept edits' : m);
 const secs = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
 const n = (x: number) => x.toLocaleString('en-US');
 const plural = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
@@ -332,6 +337,13 @@ type Hint = { key: string; label: string; action?: Action };
 
 function statusRow(v: View, w: number, hints: Hint[]): Row {
   const badges: { text: string; style: Style; action?: Action }[] = [];
+  // the mode and model chips open their menu while nothing is running and no card is up
+  const pickable = v.mode === 'prompt' || v.mode === 'browse' || v.mode === 'menu';
+  const chip = (kind: 'mode' | 'model') => (pickable ? ({ t: 'chip', kind } as const) : undefined);
+  const p = v.permission;
+  if (p === 'default') badges.push({ text: p, style: { d: true, u: pickable }, action: chip('mode') });
+  else badges.push({ text: ` ${modeLabel(p)} `, style: { b: true, fg: 'badgeText', bg: p === 'bypassPermissions' ? 'err' : 'badge' }, action: chip('mode') });
+  badges.push({ text: v.model, style: { d: true, u: pickable }, action: chip('model') });
   if (v.flash) badges.push({ text: v.flash.text, style: { fg: 'ok' } });
   if (v.newBelow) badges.push({ text: 'new below ↓', style: { b: true, u: true, fg: 'accent' }, action: { t: 'bottom' } });
   if (v.mouseOff) badges.push({ text: ' mouse off  ctrl-t to turn on ', style: { inv: true } });
@@ -540,6 +552,22 @@ function dockQuestion(v: View, w: number, c: Extract<Card, { kind: 'question' }>
   return rows;
 }
 
+function dockMenu(v: View, w: number, c: Extract<Card, { kind: 'menu' }>): Row[] {
+  const rows: Row[] = [rule(w, c.title, 'accent')];
+  const lw = Math.min(28, Math.max(...c.options.map((o) => cells(o.label))));
+  c.options.forEach((o, i) => {
+    const on = i === c.index;
+    const l = line().to(2);
+    l.row = { t: 'option', i };
+    const pad = clip(o.label, lw) + ' '.repeat(Math.max(0, lw - cells(clip(o.label, lw))));
+    l.add(on ? '❯ ' : '  ', { fg: 'accent', b: true }).add(pad, o.danger ? { fg: 'err', b: on } : on ? { b: true, fg: 'accent' } : {});
+    l.add(' ').add(o.current ? '✓' : ' ', { fg: 'ok' }).add(' ').add(clip(o.description, Math.max(0, w - l.col - 2)), on ? { i: true } : { d: true, i: true });
+    rows.push(l.done());
+  });
+  rows.push(statusRow(v, w, [{ key: '↑↓', label: 'choose' }, key('enter', 'pick'), key('esc', 'close')]));
+  return rows;
+}
+
 export function layout(v0: View): Layout {
   const W = Math.min(v0.cols, MAX_WIDTH);
   const cw = W - 1;
@@ -551,6 +579,7 @@ export function layout(v0: View): Layout {
       dock = d.rows;
       cmdMax = d.cmdMax;
     } else if (v.card?.kind === 'question') dock = dockQuestion(v, W, v.card);
+    else if (v.card?.kind === 'menu') dock = dockMenu(v, W, v.card);
     else if (v.mode === 'running') dock = dockRunning(v, W);
     else dock = dockPrompt(v, W);
     return { dock: dock.length > v.rows ? dock.slice(dock.length - v.rows) : dock, cmdMax };

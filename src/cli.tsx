@@ -5,12 +5,13 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createAgent, type AgentEvent } from './agent.js';
+import { createAgent, type AgentEvent, type RunOptions } from './agent.js';
 import { copy } from './ui/clipboard.js';
 import {
   layout, MAX_WIDTH, OUTPUT_CAP, reuseOf, selectables,
   type Action, type Card, type KeyName, type Mode, type Sel, type Step, type Turn, type View,
 } from './ui/layout.js';
+import { CYCLE, MODES, modelChoices, saveModel, startup } from './options.js';
 import { settled, waiting } from './ui/notify.js';
 import { Screen } from './ui/Screen.js';
 import { term } from './ui/terminal.js';
@@ -30,7 +31,13 @@ const FLASH_MS = 2000;
 
 const historyFile = join(homedir(), '.hey_history');
 const history = existsSync(historyFile) ? readFileSync(historyFile, 'utf8').split('\n').filter(Boolean) : [];
-const initial = process.argv.slice(2).join(' ').trim();
+const started = startup(process.argv.slice(2), process.env);
+if ('error' in started) {
+  console.error(`hey: ${started.error}`);
+  process.exit(2);
+}
+const initial = started.request;
+const start = started.run;
 
 let allTurns: Turn[] = [];
 let handoff = '';
@@ -43,6 +50,7 @@ const noKey: Key = {
 };
 const keyFor = (k: KeyName): Key => ({ ...noKey, return: k === 'enter', escape: k === 'esc', tab: k === 'tab' });
 
+const menuChoices = (kind: 'mode' | 'model', model = '') => (kind === 'mode' ? MODES : modelChoices(model));
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 const firstLine = (s: string) => s.split('\n')[0];
 
@@ -68,6 +76,8 @@ function App() {
   const [cardState, setCardState] = useState<CardState>(freshCard(''));
   const [flash, setFlash] = useState<{ text: string; until: number; step?: string; what?: string }>();
   const [mouse, setMouse] = useState(term.mouse);
+  const [choice, setChoice] = useState<RunOptions>(start);
+  const [menu, setMenu] = useState<{ kind: 'mode' | 'model'; index: number }>();
   const [, tick] = useState(0);
 
   const latest = useRef({ turns, queue, selected });
@@ -163,7 +173,7 @@ function App() {
     // a double tap on enter must not read the empty prompt as quit
     quitGuard.current = Date.now() + GUARD_MS;
     agent
-      .run(text, (e) => onEvent(id, e))
+      .run(text, (e) => onEvent(id, e), choice)
       .catch((err) => onEvent(id, { type: 'error', text: err instanceof Error ? err.message : String(err) }))
       .finally(() => endRun(id));
   };
@@ -209,7 +219,7 @@ function App() {
 
   const flashNow = flash && now < flash.until ? flash : undefined;
   const q = head?.kind === 'question' ? head.questions[ask.i] : undefined;
-  const effective: Mode = head ? (head.kind === 'question' ? 'question' : editBuf ? 'edit' : 'approval') : mode;
+  const effective: Mode = head ? (head.kind === 'question' ? 'question' : editBuf ? 'edit' : 'approval') : menu ? 'menu' : mode;
   let card: Card | undefined;
   if (head?.kind === 'approval') {
     const description = String(head.input.description ?? '') || undefined;
@@ -217,11 +227,15 @@ function App() {
     card = editBuf ? { kind: 'edit', description, original: command, buffer: editBuf } : { kind: 'approval', description, command, scroll: cmdScroll };
   } else if (head?.kind === 'question' && q) {
     card = { kind: 'question', n: ask.i + 1, total: head.questions.length, question: q.question, options: q.options, index: ask.index, typing: ask.typing };
+  } else if (menu) {
+    const current = menu.kind === 'mode' ? choice.permissionMode : choice.model;
+    card = { kind: 'menu', title: menu.kind, index: menu.index, options: menuChoices(menu.kind, choice.model).map((c) => ({ label: c.value, description: c.hint, current: c.value === current, danger: c.value === 'bypassPermissions' })) };
   }
   const lastTurn = turns.at(-1);
   const view: View = {
     cols: columns, rows, now, frame: Math.floor(now / 100), turns, mode: effective, selected, scroll, reveal, draft, card, armed,
     flash: flashNow && { text: flashNow.text, step: flashNow.step, what: flashNow.what }, mouseOff: !mouse,
+    permission: choice.permissionMode, model: choice.model,
     canTab: !!lastTurn && !running && !!reuseOf(lastTurn),
   };
   const lay = layout(view);
@@ -316,7 +330,23 @@ function App() {
     if (ask.i + 1 < head.questions.length) setAsk({ i: ask.i + 1, answers, index: 0 });
     else resolveHead({ behavior: 'allow', updatedInput: { ...head.input, answers } });
   };
+  const openMenu = (kind: 'mode' | 'model') => {
+    if (menu?.kind === kind) return setMenu(undefined);
+    const current = kind === 'mode' ? choice.permissionMode : choice.model;
+    setMenu({ kind, index: Math.max(0, menuChoices(kind, choice.model).findIndex((c) => c.value === current)) });
+  };
+  const choose = (i: number) => {
+    const value = menu && menuChoices(menu.kind, choice.model)[i]?.value;
+    if (!menu || !value) return;
+    if (menu.kind === 'mode') setChoice((c) => ({ ...c, permissionMode: value as RunOptions['permissionMode'] }));
+    else {
+      setChoice((c) => ({ ...c, model: value }));
+      saveModel(value);
+    }
+    setMenu(undefined);
+  };
   const pickOption = (i: number) => {
+    if (menu) return choose(i);
     if (!q) return;
     if (i < q.options.length) answerQuestion(q.options[i].label);
     else setAsk({ ...ask, index: i, typing: edit.of('') });
@@ -351,6 +381,11 @@ function App() {
   handle.current = (input, key, passed) => {
     const quiet = passed ?? touch();
     if (key.ctrl && input === 't') return toggleMouse();
+    // the next request picks these up. while one runs or a card is up they stay as they are
+    if (effective === 'prompt' || effective === 'browse' || effective === 'menu') {
+      if (key.tab && key.shift) return setChoice((c) => ({ ...c, permissionMode: CYCLE[(CYCLE.indexOf(c.permissionMode) + 1) % CYCLE.length] }));
+      if (key.ctrl && input === 'o') return openMenu('model');
+    }
     if (key.pageUp || key.pageDown) return scrollBy((key.pageUp ? -1 : 1) * Math.max(1, laid.current!.viewH - 1));
     const ctrlC = key.ctrl && input === 'c';
 
@@ -380,6 +415,12 @@ function App() {
       else if (key.downArrow) setAsk({ ...ask, index: Math.min(q!.options.length, ask.index + 1) });
       else if (key.return) pickOption(ask.index);
       else if (key.escape) skipQuestion();
+    } else if (effective === 'menu') {
+      const last = menuChoices(menu!.kind, choice.model).length - 1;
+      if (key.escape || ctrlC) setMenu(undefined);
+      else if (key.upArrow) setMenu({ ...menu!, index: Math.max(0, menu!.index - 1) });
+      else if (key.downArrow) setMenu({ ...menu!, index: Math.min(last, menu!.index + 1) });
+      else if (key.return) choose(menu!.index);
     } else if (effective === 'running') {
       if (ctrlC) stopping.current ? finish() : stop();
       else if (key.escape) stop();
@@ -434,6 +475,7 @@ function App() {
       case 'back': return setEditBuf(undefined);
       case 'runEdited': return editBuf?.text.trim() ? runApproval(editBuf.text) : undefined;
       case 'option': return pickOption(a.i);
+      case 'chip': return openMenu(a.kind);
       case 'prompt':
         if (mode === 'browse') {
           setMode('prompt');
