@@ -1,14 +1,18 @@
 import { homedir } from 'node:os';
 import { cells, clip, clipStart, firstGrapheme, wrap } from './text.js';
 import type { Edit } from './text.js';
+import { highlight, shimmer, sliceSpans, withStyle } from './style.js';
 
 // the whole screen is computed here as plain rows, so scrolling, the sticky header, the scrollbar and click mapping are arithmetic.
 // ink only prints the rows. see plans/2026-11-16-hey-ui-redesign.md for the look
 
-export const MAX_WIDTH = 100;
+// the frame spans the terminal. cli.tsx still min()s its width with this, so it stays exported and unbounded
+export const MAX_WIDTH = Infinity;
+// long prose is capped so lines stay readable on a wide screen. the frame itself is not
+export const ANSWER_WIDTH = 120;
 export const OUTPUT_CAP = 2000;
 const FAILED_LINES = 2;
-const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const SPINNER = '⣾⣽⣻⢿⡿⣟⣯⣷';
 
 export type Step = {
   id: string;
@@ -56,7 +60,9 @@ export type Action =
   | { t: 'bottom' }
   | { t: 'tab' };
 
-export type Style = { b?: boolean; d?: boolean; u?: boolean; inv?: boolean; fg?: 'green' | 'red' | 'cyan' | 'black'; bg?: 'yellow' };
+// colors are tokens, resolved to a palette in theme.ts. tint is a faint wash of the terminal's own background
+export type Tone = 'accent' | 'ok' | 'err' | 'flag' | 'str' | 'var' | 'value' | 'badgeText';
+export type Style = { b?: boolean; d?: boolean; i?: boolean; u?: boolean; inv?: boolean; fg?: Tone; bg?: 'badge' | 'accent' | 'tint' };
 export type Span = { t: string; s: Style };
 export type Hit = { x0: number; x1: number; action: Action };
 type Meta = { step: string; part: 'head' | 'cmd' | 'action' | 'out'; idx?: number };
@@ -144,19 +150,22 @@ const n = (x: number) => x.toLocaleString('en-US');
 const plural = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
 
 function result(s: Step, now: number): { text: string; style: Style } {
-  if (s.status === 'running') return { text: secs(now - s.startedAt), style: { d: true } };
+  if (s.status === 'running') return { text: secs(now - s.startedAt), style: { d: true, i: true } };
   if (s.status === 'declined') return { text: 'skipped', style: { d: true } };
   if (s.status === 'stopped') return { text: 'stopped', style: { d: true } };
-  if (s.status === 'failed') return { text: s.code === undefined ? 'failed' : `exit ${s.code}`, style: { fg: 'red' } };
+  if (s.status === 'failed') return { text: s.code === undefined ? 'failed' : `exit ${s.code}`, style: { fg: 'err' } };
   if (s.total === 0) return { text: '', style: {} };
-  if (s.total === 1) return { text: clip(s.output[0].trim(), 14), style: {} };
+  if (s.total === 1) return { text: clip(s.output[0].trim(), 14), style: { fg: 'value' } };
   return { text: `${n(s.total)} lines`, style: { d: true } };
 }
 
-function glyph(s: Step, frame: number): { t: string; s: Style } {
-  if (s.status === 'running') return { t: SPINNER[frame % SPINNER.length], s: { fg: 'cyan' } };
-  if (s.status === 'ok') return { t: '✓', s: { fg: 'green' } };
-  if (s.status === 'failed') return { t: '✗', s: { fg: 'red' } };
+// a step that just finished fades its mark in (dim, then bold, then settled). frozen mid-way it is still a plain mark
+function glyph(s: Step, v: Pick<View, 'frame' | 'now'>): { t: string; s: Style } {
+  const age = s.endedAt === undefined ? Infinity : v.now - s.endedAt;
+  const fade: Style = age < 120 ? { d: true } : age < 420 ? { b: true } : {};
+  if (s.status === 'running') return { t: SPINNER[v.frame % SPINNER.length], s: { fg: 'accent' } };
+  if (s.status === 'ok') return { t: '✓', s: { fg: 'ok', ...fade } };
+  if (s.status === 'failed') return { t: '✗', s: { fg: 'err', ...fade } };
   return { t: '-', s: { d: true } };
 }
 
@@ -164,18 +173,20 @@ function stepRows(v: View, s: Step, cw: number): Row[] {
   const out: Row[] = [];
   const sel = v.selected?.kind === 'step' && v.selected.id === s.id;
   const re = cw - 1;
-  const g = glyph(s, v.frame);
+  const g = glyph(s, v);
   const r = result(s, v.now);
   const firstLine = s.command.split('\n')[0] + (s.command.includes('\n') ? ' …' : '');
   const showResult = cw + 1 >= 70 && r.text !== '';
   const avail = re - 4 - (showResult ? cells(r.text) + 2 : 0);
   const text = clip(firstLine, avail);
-  const [prog, ...rest] = text.split(/(?<=\S)(?=\s)/);
+  const hl = highlight(text);
+  const quiet = s.status === 'declined' || s.status === 'stopped';
+  const body = s.status === 'running' ? shimmer(hl, v.frame, cells(text)) : quiet ? withStyle(hl, (st) => ({ ...st, d: true })) : hl;
   const head = line();
   head.meta = { step: s.id, part: 'head' };
   head.row = { t: 'step', id: s.id };
-  head.add(sel || s.expanded ? (s.expanded ? '▾' : '▸') : ' ', sel ? { fg: 'cyan' } : { d: true }).add(' ').add(g.t, g.s).add(' ');
-  head.add(prog ?? '', { b: true }).add(rest.join(''), s.expanded ? { b: true } : {});
+  head.add(sel || s.expanded ? (s.expanded ? '▾' : '▸') : ' ', sel ? { fg: 'accent' } : { d: true }).add(' ').add(g.t, g.s).add(' ');
+  for (const sp of body) head.add(sp.t, sp.s);
   if (showResult) head.to(re - cells(r.text)).add(r.text, r.style);
   out.push(head.done());
 
@@ -186,23 +197,28 @@ function stepRows(v: View, s: Step, cw: number): Row[] {
   if (s.expanded) {
     if (cells(firstLine) > avail || s.command.includes('\n')) {
       const ranges = wrap(s.command, cw - 8, cw - 8);
-      for (const rg of ranges) out.push(tagged(line().to(6).add(s.command.slice(rg.start, rg.end), { d: true }), 'cmd'));
+      const cmdSpans = highlight(s.command);
+      for (const rg of ranges) {
+        const l = line().to(6);
+        for (const sp of sliceSpans(cmdSpans, rg.start, rg.end)) l.add(sp.t, { ...sp.s, d: true });
+        out.push(tagged(l, 'cmd'));
+      }
     }
     const a = line().to(4);
     const copied = (what: string) => v.flash?.step === s.id && v.flash.what === what;
-    a.add(copied('command') ? 'copied ✓' : 'copy command', copied('command') ? { fg: 'green' } : { u: true }, { t: 'copy', what: 'command', step: s.id });
+    a.add(copied('command') ? 'copied ✓' : 'copy command', copied('command') ? { fg: 'ok' } : { u: true, fg: 'accent' }, { t: 'copy', what: 'command', step: s.id });
     a.add('  ·  ', { d: true });
-    a.add(copied('output') ? 'copied ✓' : 'copy output', copied('output') ? { fg: 'green' } : { u: true }, { t: 'copy', what: 'output', step: s.id });
+    a.add(copied('output') ? 'copied ✓' : 'copy output', copied('output') ? { fg: 'ok' } : { u: true, fg: 'accent' }, { t: 'copy', what: 'output', step: s.id });
     a.add('  ·  ', { d: true });
-    a.add('collapse', { u: true }, { t: 'step', id: s.id });
+    a.add('collapse', { u: true, fg: 'accent' }, { t: 'step', id: s.id });
     out.push(tagged(a, 'action'));
-    if (s.total > s.output.length) out.push(tagged(line().to(6).add(`last ${n(s.output.length)} of ${n(s.total)}`, { d: true }), 'out'));
-    if (!s.output.length) out.push(tagged(line().to(6).add('no output', { d: true }), 'out'));
+    if (s.total > s.output.length) out.push(tagged(line().to(6).add(`last ${n(s.output.length)} of ${n(s.total)}`, { d: true, i: true }), 'out'));
+    if (!s.output.length) out.push(tagged(line().to(6).add('no output', { d: true, i: true }), 'out'));
     s.output.forEach((l, i) => out.push(tagged(line().to(6).add(clip(l, cw - 6)), 'out', i)));
   } else if (s.status === 'failed' && s.output.length) {
     for (const l of s.output.slice(-FAILED_LINES)) out.push(line().to(6).add(clip(l, cw - 6)).done());
     if (s.total > FAILED_LINES) {
-      const more = line().to(6).add(`+${n(s.total - FAILED_LINES)} lines`, { u: true });
+      const more = line().to(6).add(`+${n(s.total - FAILED_LINES)} lines`, { u: true, fg: 'accent' });
       more.row = { t: 'step', id: s.id };
       out.push(more.done());
     }
@@ -210,29 +226,63 @@ function stepRows(v: View, s: Step, cw: number): Row[] {
   return out;
 }
 
+// blank lines in an answer read as big gaps in a terminal. keep one between paragraphs, none around lists or after a lead-in ending in ":"
+export function tidy(text: string): string {
+  const lines = text.split('\n').map((l) => l.trimEnd());
+  const item = (l?: string) => l !== undefined && /^\s*([-*•]|\d+[.)])\s/.test(l);
+  const out: string[] = [];
+  lines.forEach((l, i) => {
+    if (l === '') {
+      const prev = out.at(-1);
+      if (prev === undefined || prev === '') return;
+      if (prev.endsWith(':') || item(lines.slice(i + 1).find((x) => x !== ''))) return;
+    }
+    out.push(l);
+  });
+  while (out.at(-1) === '') out.pop();
+  return out.join('\n');
+}
+
+// a row with the answer-block wash behind it, from the bar to the right edge
+function tinted(l: Line, end: number): Row {
+  const row = l.done();
+  const spans = row.spans.map((sp, i) => (i === 0 && sp.t === '  ' ? sp : { t: sp.t, s: { ...sp.s, bg: 'tint' as const } }));
+  const used = spans.reduce((a, sp) => a + cells(sp.t), 0);
+  if (used < end) spans.push({ t: ' '.repeat(end - used), s: { bg: 'tint' } });
+  return { ...row, spans };
+}
+
 function answerRows(t: Turn, cw: number, latest: boolean): Row[] {
   const out: Row[] = [];
   const re = cw - 1;
-  const w = cw - 5;
-  const ranges = wrap(t.answer, w, w - 6);
+  const wFull = cw - 5;
+  const w = Math.min(wFull, ANSWER_WIDTH);
+  const text = tidy(t.answer);
+  const ranges = wrap(text, w, Math.min(w, wFull - 6));
+  const bar = (l: Line) => l.to(2).add('▌', { fg: 'accent' }).add(' ');
   ranges.forEach((rg, i) => {
-    const l = line().to(2).add('▌').add(' ');
-    const txt = t.answer.slice(rg.start, rg.end);
-    l.add(txt, i === 0 ? { b: true } : {});
-    if (i === 0) l.to(re - 4).add('copy', { u: true }, { t: 'copy', what: 'answer', turn: t.id });
-    out.push(l.done());
+    const l = bar(line());
+    const txt = text.slice(rg.start, rg.end);
+    const m = /^(\s*)([-*•]|\d+[.)])(\s)/.exec(txt);
+    if (i === 0) l.add(txt, { b: true });
+    else if (m) l.add(m[1]).add(m[2], { fg: 'accent' }).add(txt.slice(m[1].length + m[2].length));
+    else l.add(txt);
+    if (i === 0) l.to(re - 4).add('copy', { u: true, fg: 'accent' }, { t: 'copy', what: 'answer', turn: t.id });
+    out.push(tinted(l, cw));
   });
   const reuse = latest ? reuseOf(t) : undefined;
   if (reuse) {
-    out.push(line().to(2).add('▌').done());
-    const rr = wrap(reuse, w - 2, w - 2 - 11);
+    out.push(tinted(bar(line()), cw));
+    const rr = wrap(reuse, wFull - 2, wFull - 2 - 11);
+    const spans = highlight(reuse);
     rr.forEach((rg, i) => {
-      const l = line().to(2).add('▌').add(' ');
-      l.add(i === 0 ? '$ ' : '  ', { d: true }).add(reuse.slice(rg.start, rg.end));
+      const l = bar(line());
+      l.add(i === 0 ? '$ ' : '  ', { d: true });
+      for (const sp of sliceSpans(spans, rg.start, rg.end)) l.add(sp.t, sp.s);
       if (i === 0) {
-        l.to(re - 9).add('copy', { u: true }, { t: 'copy', what: 'reuse', turn: t.id }).add('  ').add('tab', { b: true, u: true }, { t: 'tab' });
+        l.to(re - 9).add('copy', { u: true, fg: 'accent' }, { t: 'copy', what: 'reuse', turn: t.id }).add('  ').add('tab', { b: true, u: true, fg: 'accent' }, { t: 'tab' });
       }
-      out.push(l.done());
+      out.push(tinted(l, cw));
     });
   }
   return out;
@@ -244,13 +294,13 @@ function buildLog(v: View, cw: number): Row[] {
     const last = ti === v.turns.length - 1;
     if (ti > 0) out.push(blank());
     const rq = wrap(t.request, cw - 2);
-    rq.forEach((rg, i) => out.push(line().add(i === 0 ? '›' : ' ', { fg: 'cyan', b: true }).add(' ').add(t.request.slice(rg.start, rg.end), { b: true }).done()));
+    rq.forEach((rg, i) => out.push(line().add(i === 0 ? '›' : ' ', { fg: 'accent', b: true }).add(' ').add(t.request.slice(rg.start, rg.end), { b: true }).done()));
     const folded = t.folded && !last;
     if (!last && t.steps.length) {
       const sel = v.selected?.kind === 'fold' && v.selected.turn === t.id;
       const f = line();
       f.row = { t: 'fold', turn: t.id };
-      f.add(sel ? '▸' : ' ', { fg: 'cyan' }).add(' ').add(folded ? '▸' : '▾', { d: true }).add(' ');
+      f.add(sel ? '▸' : ' ', { fg: 'accent' }).add(' ').add(folded ? '▸' : '▾', { d: true }).add(' ');
       f.add(`${plural(t.steps.length, 'command')} · ${secs((t.endedAt ?? v.now) - t.startedAt)}`, { d: true, u: true });
       out.push(f.done());
     }
@@ -271,9 +321,9 @@ function buildLog(v: View, cw: number): Row[] {
   return out;
 }
 
-const rule = (w: number, badge?: string) => {
+const rule = (w: number, badge?: string, tone: 'badge' | 'accent' = 'badge') => {
   const l = line().add('──', { d: true });
-  if (badge) l.add(` ${badge} `, { b: true, fg: 'black', bg: 'yellow' }).add('─'.repeat(Math.max(0, w - 4 - cells(badge))), { d: true });
+  if (badge) l.add(` ${badge} `, { b: true, fg: 'badgeText', bg: tone }).add('─'.repeat(Math.max(0, w - 4 - cells(badge))), { d: true });
   else l.add('─'.repeat(Math.max(0, w - 2)), { d: true });
   return l.done();
 };
@@ -282,8 +332,8 @@ type Hint = { key: string; label: string; action?: Action };
 
 function statusRow(v: View, w: number, hints: Hint[]): Row {
   const badges: { text: string; style: Style; action?: Action }[] = [];
-  if (v.flash) badges.push({ text: v.flash.text, style: { fg: 'green' } });
-  if (v.newBelow) badges.push({ text: 'new below ↓', style: { b: true, u: true }, action: { t: 'bottom' } });
+  if (v.flash) badges.push({ text: v.flash.text, style: { fg: 'ok' } });
+  if (v.newBelow) badges.push({ text: 'new below ↓', style: { b: true, u: true, fg: 'accent' }, action: { t: 'bottom' } });
   if (v.mouseOff) badges.push({ text: ' mouse off  ctrl-t to turn on ', style: { inv: true } });
   const badgeW = badges.reduce((a, b) => a + cells(b.text) + 2, 0);
   const hintW = (hs: Hint[]) => hs.reduce((a, h, i) => a + cells(h.key) + 1 + cells(h.label) + (i ? 3 : 0), 0);
@@ -292,7 +342,7 @@ function statusRow(v: View, w: number, hints: Hint[]): Row {
   while (shown.length && cells(cwd) > w - hintW(shown) - 2 - badgeW && w - hintW(shown) - 2 - badgeW < Math.min(cells(cwd), 12)) shown.pop();
   const l = line();
   const hw = hintW(shown) + (shown.length ? 1 : 0);
-  l.add(clipStart(cwd, Math.max(1, w - hw - badgeW - 1)), { d: true });
+  l.add(clipStart(cwd, Math.max(1, w - hw - badgeW - 1)), { d: true, i: true });
   for (const b of badges) l.add('  ').add(b.text, b.style, b.action);
   l.to(w - hintW(shown) - 1);
   shown.forEach((h, i) => {
@@ -306,24 +356,34 @@ function statusRow(v: View, w: number, hints: Hint[]): Row {
 
 const key = (k: KeyName, label: string, kk: string = k): Hint => ({ key: kk, label, action: { t: 'key', key: k } });
 
-function button(l: Line, label: string, hint: string, style: Style, action?: Action) {
+type Tier = 'primary' | 'secondary' | 'off';
+
+// primary is a filled pill, secondary a dim bracket with a plain label, off is the same bracket all dim (guard still closed)
+function button(l: Line, label: string, hint: string, tier: Tier, action?: Action) {
   const x0 = l.col;
-  l.add('[ ').add(label, style);
-  if (hint) l.add('  ').add(hint, { d: true });
-  l.add(' ]');
+  if (tier === 'primary') {
+    l.add(' ', { bg: 'accent' }).add(label, { b: true, fg: 'badgeText', bg: 'accent' });
+    if (hint) l.add('  ', { bg: 'accent' }).add(hint, { fg: 'badgeText', bg: 'accent' });
+    l.add(' ', { bg: 'accent' });
+  } else {
+    const dim = tier === 'off';
+    l.add('[ ', { d: true }).add(label, dim ? { d: true, i: true } : {});
+    if (hint) l.add('  ').add(hint, { d: true });
+    l.add(' ]', { d: true });
+  }
   if (action) l.hits.push({ x0, x1: l.col, action });
 }
 
 function promptRow(v: View, w: number, focused: boolean, empty: boolean): Row {
   const l = line();
-  l.add('›', { fg: 'cyan', b: true }).add(' ');
+  l.add('›', { fg: 'accent', b: true }).add(' ');
   l.row = { t: 'prompt', base: 0 };
   const room = w - 3;
   const { text, cur } = v.draft;
   if (!text) {
     const hint = empty ? 'ask for something in plain english' : 'follow up';
-    if (focused) l.add(hint[0], { inv: true }).add(hint.slice(1), { d: true });
-    else l.add(hint, { d: true });
+    if (focused) l.add(hint[0], { inv: true }).add(hint.slice(1), { d: true, i: true });
+    else l.add(hint, { d: true, i: true });
     return l.done();
   }
   // scroll sideways so the cursor stays on screen
@@ -367,7 +427,7 @@ function dockPrompt(v: View, w: number): Row[] {
 function dockRunning(v: View, w: number): Row[] {
   const t = v.turns.at(-1);
   const count = t ? t.steps.filter((s) => s.status !== 'pending').length : 0;
-  const running = line().to(2).add(`${count ? `running ${plural(count, 'step')}` : 'working'} · ${secs(v.now - (t?.startedAt ?? v.now))}`, { d: true }).done();
+  const running = line().to(2).add(SPINNER[v.frame % SPINNER.length], { fg: 'accent' }).add(' ').add(`${count ? `running ${plural(count, 'step')}` : 'working'} · ${secs(v.now - (t?.startedAt ?? v.now))}`, { d: true, i: true }).done();
   const sel = v.selected?.kind === 'step' && t?.steps.find((s) => s.id === (v.selected as { id: string }).id);
   const hints: Hint[] = [key('esc', 'stop')];
   if (count) hints.push({ key: '↑↓', label: 'select' });
@@ -381,9 +441,9 @@ function dockApproval(v: View, w: number, card: Extract<Card, { kind: 'approval'
   const editing = card.kind === 'edit';
   const dirty = editing && card.buffer.text !== card.original;
   const desc = card.description ?? 'run this command';
-  const head: Row[] = [rule(w, editing ? 'edit' : 'approve')];
+  const head: Row[] = [rule(w, editing ? 'edit' : 'approve', editing ? 'accent' : 'badge')];
   const descText = editing && dirty ? `was: ${desc}` : desc;
-  for (const rg of wrap(descText, w - 4)) head.push(line().to(2).add(descText.slice(rg.start, rg.end), editing && dirty ? { d: true } : { b: true }).done());
+  for (const rg of wrap(descText, w - 4)) head.push(line().to(2).add(descText.slice(rg.start, rg.end), editing && dirty ? { d: true, i: true } : { b: true }).done());
   head.push(blank());
   const text = editing ? card.buffer.text : card.command;
   // the command is never truncated. it wraps with a 4 cell hanging indent, and the region scrolls when it is taller than the screen allows
@@ -397,10 +457,11 @@ function dockApproval(v: View, w: number, card: Extract<Card, { kind: 'approval'
     const own = ranges.findIndex((r, i) => card.buffer.cur < (ranges[i + 1]?.start ?? Infinity) || i === ranges.length - 1);
     from = Math.max(0, Math.min(own - visible + 1 + Math.floor(visible / 2), ranges.length - visible));
   } else from = Math.min(card.scroll, ranges.length - visible);
+  const cmdSpans = editing ? [] : highlight(text);
   const body: Row[] = [];
   for (let i = from; i < from + visible; i++) {
     const rg = ranges[i];
-    const l = line().to(2).add(i === 0 ? '$ ' : '    ', { d: true });
+    const l = line().to(2).add(i === 0 ? '$ ' : '    ', i === 0 ? { fg: 'accent', b: true } : { d: true });
     if (editing) {
       const c = card.buffer.cur;
       const owns = c >= rg.start && c < (ranges[i + 1]?.start ?? Infinity) || (i === ranges.length - 1 && c >= rg.start);
@@ -412,32 +473,32 @@ function dockApproval(v: View, w: number, card: Extract<Card, { kind: 'approval'
         l.add(text.slice(rg.start, at)).add(ch || ' ', { inv: true }).add(rest.slice(ch.length));
       } else l.add(text.slice(rg.start, rg.end));
       l.row = { t: 'editAt', start: rg.start, end: rg.end, x };
-    } else l.add(text.slice(rg.start, rg.end));
-    body.push(l.done());
+    } else for (const sp of sliceSpans(cmdSpans, rg.start, rg.end)) l.add(sp.t, sp.s);
+    body.push(editing ? l.done() : tinted(l, w));
   }
   const seenEnd = from + visible >= ranges.length;
   const buttons = line().to(2);
   if (editing) {
-    button(buttons, 'run edited', 'enter', { b: true, inv: true }, { t: 'runEdited' });
+    button(buttons, 'run edited', 'enter', 'primary', { t: 'runEdited' });
     buttons.add('   ');
-    button(buttons, 'back', 'esc', {}, { t: 'back' });
+    button(buttons, 'back', 'esc', 'secondary', { t: 'back' });
     const hint = 'ctrl-j newline';
-    buttons.to(w - cells(hint) - 2).add(hint, { d: true });
+    buttons.to(w - cells(hint) - 2).add(hint, { d: true, i: true });
   } else {
     const live = v.armed && seenEnd;
-    button(buttons, 'run', 'enter', live ? { b: true, inv: true } : { d: true }, live ? { t: 'run' } : undefined);
+    button(buttons, 'run', 'enter', live ? 'primary' : 'off', live ? { t: 'run' } : undefined);
     buttons.add('   ');
-    button(buttons, 'edit', 'e', {}, { t: 'edit' });
+    button(buttons, 'edit', 'e', 'secondary', { t: 'edit' });
     buttons.add('   ');
-    button(buttons, 'skip', 'esc', {}, { t: 'skip' });
-    buttons.to(w - 6).add('copy', { u: true }, { t: 'copy', what: 'command' });
+    button(buttons, 'skip', 'esc', 'secondary', { t: 'skip' });
+    buttons.to(w - 6).add('copy', { u: true, fg: 'accent' }, { t: 'copy', what: 'command' });
   }
   const hints: Hint[] = !editing && !seenEnd ? [{ key: 'pgdn', label: 'more', action: { t: 'page', dir: 1 } }] : [];
   return { rows: [...head, ...body, blank(), buttons.done(), statusRow(v, w, hints)], cmdMax: Math.max(0, ranges.length - visible) };
 }
 
 function dockQuestion(v: View, w: number, c: Extract<Card, { kind: 'question' }>): Row[] {
-  const rows: Row[] = [rule(w, c.total > 1 ? `question ${c.n}/${c.total}` : 'question')];
+  const rows: Row[] = [rule(w, c.total > 1 ? `question ${c.n}/${c.total}` : 'question', 'accent')];
   for (const rg of wrap(c.question, w - 4)) rows.push(line().to(2).add(c.question.slice(rg.start, rg.end), { b: true }).done());
   rows.push(blank());
   const labels = [...c.options.map((o) => o.label), 'other'];
@@ -448,28 +509,31 @@ function dockQuestion(v: View, w: number, c: Extract<Card, { kind: 'question' }>
     const on = i === c.index;
     const isOther = i === c.options.length;
     if (isOther && c.typing) {
-      l.add('› ', { fg: 'cyan', b: true });
+      l.add('❯ ', { fg: 'accent', b: true });
       const { text, cur } = c.typing;
       l.add(text.slice(0, cur)).add(text[cur] ?? ' ', { inv: true }).add(text.slice(cur + 1));
     } else {
-      button(l, clip(label, lw) + ' '.repeat(Math.max(0, lw - cells(clip(label, lw)))), '', on ? { b: true, inv: true } : {}, { t: 'option', i });
+      const x0 = l.col;
+      const pad = clip(label, lw) + ' '.repeat(Math.max(0, lw - cells(clip(label, lw))));
+      l.add(on ? '❯ ' : '  ', { fg: 'accent', b: true }).add(pad, on ? { b: true, fg: 'accent' } : {});
+      l.hits.push({ x0, x1: l.col, action: { t: 'option', i } });
       const d = isOther ? 'type your own answer' : c.options[i].description;
-      l.add('  ').add(clip(d, Math.max(0, w - l.col - 2)), { d: true });
+      l.add('  ').add(clip(d, Math.max(0, w - l.col - 2)), on ? { i: true } : { d: true, i: true });
     }
     rows.push(l.done());
   });
   rows.push(blank());
   const b = line().to(2);
   if (c.typing) {
-    button(b, 'send', 'enter', { b: true, inv: true }, { t: 'key', key: 'enter' });
+    button(b, 'send', 'enter', 'primary', { t: 'key', key: 'enter' });
     b.add('   ');
-    button(b, 'back', 'esc', {}, { t: 'key', key: 'esc' });
+    button(b, 'back', 'esc', 'secondary', { t: 'key', key: 'esc' });
   } else {
-    button(b, 'answer', 'enter', v.armed ? { b: true, inv: true } : { d: true }, { t: 'key', key: 'enter' });
+    button(b, 'answer', 'enter', v.armed ? 'primary' : 'off', { t: 'key', key: 'enter' });
     b.add('   ');
-    button(b, 'skip', 'esc', {}, { t: 'key', key: 'esc' });
+    button(b, 'skip', 'esc', 'secondary', { t: 'key', key: 'esc' });
     const hint = '↑↓ choose';
-    b.to(w - cells(hint) - 2).add(hint, { d: true });
+    b.to(w - cells(hint) - 2).add(hint, { d: true, i: true });
   }
   rows.push(b.done());
   rows.push(statusRow(v, w, hints));
@@ -520,10 +584,11 @@ export function layout(v0: View): Layout {
       const off = step.total - step.output.length;
       const l = line();
       l.row = { t: 'step', id: step.id };
-      const g = glyph(step, v.frame);
+      const g = glyph(step, v);
       const sel = v.selected?.kind === 'step' && v.selected.id === step.id;
       const label = idx.length ? `lines ${n(off + Math.min(...idx) + 1)}-${n(off + Math.max(...idx) + 1)} of ${n(step.total)}` : '';
-      l.add('▾', sel ? { fg: 'cyan' } : { d: true }).add(' ').add(g.t, g.s).add(' ').add(clip(step.command.split('\n')[0], cw - 5 - cells(label) - 2), { b: true });
+      l.add('▾', sel ? { fg: 'accent' } : { d: true }).add(' ').add(g.t, g.s).add(' ');
+      for (const sp of highlight(clip(step.command.split('\n')[0], cw - 5 - cells(label) - 2))) l.add(sp.t, sp.s);
       l.to(cw - 1 - cells(label)).add(label, { d: true });
       rows[pad] = l.done();
     }
@@ -541,7 +606,7 @@ export function layout(v0: View): Layout {
       l.to(cw);
       const thumb = i >= thumbTop && i < thumbTop + thumbH;
       l.hits.push({ x0: cw, x1: cw + 1, action: { t: 'page', dir: i < thumbTop ? -1 : 1 } });
-      l.add(thumb ? '┃' : '│', thumb ? {} : { d: true });
+      l.add(thumb ? '▐' : ' ', { d: true });
       rows[i] = { ...l.done(), row: r.row, meta: r.meta };
     });
   }

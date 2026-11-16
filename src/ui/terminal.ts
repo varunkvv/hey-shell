@@ -8,19 +8,29 @@ const FOCUS_OFF = '\x1b[?1004l';
 const ALT_ON = '\x1b[?1049h';
 const ALT_OFF = '\x1b[?1049l';
 const CURSOR_ON = '\x1b[?25h';
+// synchronized output is written by ink around each frame. if we die mid-frame the terminal would hold the screen, so restore() ends it
+const SYNC_OFF = '\x1b[?2026l';
+// ask the terminal for its background color. the answer is ESC ] 11 ; rgb:RRRR/GGGG/BBBB (BEL or ESC \)
+const BG_QUERY = '\x1b]11;?\x07';
+const BG_REPLY = /\x1b\]11;(?:rgba?:)?([0-9a-f]+)\/([0-9a-f]+)\/([0-9a-f]+)(?:\/[0-9a-f]+)?(?:\x07|\x1b\\)/gi;
+const BG_PARTIAL = /\x1b\](?:1(?:1(?:;[^\x07\x1b]*)?)?)?$|\x1b\]11;[^\x07\x1b]*\x1b$/;
+const BG_WAIT_MS = 120;
 
 // sgr mouse report (ESC [ < button ; col ; row M|m) and focus in / out (ESC [ I|O)
 const REPORT = /\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[([IO])/g;
 const PARTIAL = /\x1b\[<[\d;]*$/;
+const PARTIAL_ANY = new RegExp(`${PARTIAL.source}|${BG_PARTIAL.source}`);
 
 export type Focus = 'unknown' | 'focused' | 'blurred';
 export type Press = { col: number; row: number };
+export type Background = { ready: boolean; light: boolean; bg?: [number, number, number] };
 
 const on = {
   press: new Set<(p: Press) => void>(),
   wheel: new Set<(dir: 1 | -1) => void>(),
   focus: new Set<() => void>(),
   input: new Set<() => void>(),
+  theme: new Set<() => void>(),
 };
 const emit = <T>(set: Set<(a: T) => void>, a: T) => set.forEach((f) => f(a));
 
@@ -29,6 +39,9 @@ let mouse = false;
 let focus: Focus = 'unknown';
 let unmount: (() => void) | undefined;
 let lastData = 0;
+// dark until the terminal says otherwise. `ready` flips on the answer or after BG_WAIT_MS, whichever comes first
+let background: Background = { ready: false, light: false };
+const hexv = (h: string) => parseInt(h, 16) / (16 ** h.length - 1);
 
 // sync on purpose. this also runs from 'exit' and from signal handlers
 const write = (s: string) => {
@@ -41,6 +54,9 @@ export const term = {
   get focus() {
     return focus;
   },
+  get background() {
+    return background;
+  },
   get mouse() {
     return mouse;
   },
@@ -49,6 +65,7 @@ export const term = {
     wheel: (f: (dir: 1 | -1) => void) => (on.wheel.add(f), () => void on.wheel.delete(f)),
     focus: (f: () => void) => (on.focus.add(f), () => void on.focus.delete(f)),
     input: (f: () => void) => (on.input.add(f), () => void on.input.delete(f)),
+    theme: (f: () => void) => (on.theme.add(f), () => void on.theme.delete(f)),
   },
 
   // call before render. ink reads stdin with stdin.read(), so filtering read keeps mouse and focus reports out of useInput
@@ -65,8 +82,13 @@ export const term = {
         if (chunk === null) return null;
         lastData = Date.now();
         let text = held + String(chunk);
-        held = PARTIAL.exec(text)?.[0] ?? '';
-        text = text.slice(0, text.length - held.length).replace(REPORT, (_, b, col, row, end, f) => {
+        held = PARTIAL_ANY.exec(text)?.[0] ?? '';
+        text = text.slice(0, text.length - held.length).replace(BG_REPLY, (_, r, g, b) => {
+          const c: [number, number, number] = [hexv(r), hexv(g), hexv(b)];
+          background = { ready: true, light: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 0.5, bg: c.map((x) => x * 255) as [number, number, number] };
+          emit(on.theme, undefined);
+          return '';
+        }).replace(REPORT, (_, b, col, row, end, f) => {
           if (f) {
             focus = f === 'I' ? 'focused' : 'blurred';
             emit(on.focus, undefined);
@@ -86,7 +108,18 @@ export const term = {
         }
       }
     };
+    // frames are already wrapped in synchronized output (DEC 2026) by ink 8, so there is nothing to turn on here
     write(ALT_ON + FOCUS_ON + (mouseOn ? MOUSE_ON : ''));
+    // raw mode now, so the answer is not echoed onto the screen. ink turns it on again for itself and restore() turns it off
+    try {
+      stdin.setRawMode?.(true);
+    } catch {}
+    write(BG_QUERY);
+    setTimeout(() => {
+      if (background.ready) return;
+      background = { ...background, ready: true };
+      emit(on.theme, undefined);
+    }, BG_WAIT_MS).unref();
     // every way out. sigkill can't be caught
     process.on('exit', term.restore);
     // on these paths the process is going away. ink's own exit hook may still be mid-unmount, and what it would write
@@ -141,7 +174,7 @@ export const term = {
     try {
       unmount?.();
     } catch {}
-    write(MOUSE_OFF + FOCUS_OFF + ALT_OFF + CURSOR_ON);
+    write(SYNC_OFF + MOUSE_OFF + FOCUS_OFF + ALT_OFF + CURSOR_ON);
     try {
       process.stdin.setRawMode?.(false);
     } catch {}
