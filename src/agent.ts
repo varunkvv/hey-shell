@@ -12,10 +12,20 @@ const allowedTools = [
 ];
 
 export type AgentEvent =
-  | { type: 'narration'; text: string }
-  | { type: 'step'; id: string; command: string }
+  | { type: 'step'; id: string; command: string; description?: string }
   | { type: 'stepDone'; id: string; text: string; isError: boolean }
-  | { type: 'answer'; text: string };
+  | { type: 'answer'; text: string; reuse?: string }
+  | { type: 'error'; text: string }
+  | { type: 'done' };
+
+// the model ends with "reuse:" and a fenced block holding one command that does the whole job
+const REUSE = /(?:^|\n)reuse:?[ \t]*\n```\w*\n([\s\S]*?)\n```\s*$/i;
+
+export function splitAnswer(full: string): { text: string; reuse?: string } {
+  const m = REUSE.exec(full.trim());
+  const reuse = m?.[1].trim();
+  return m && reuse ? { text: full.trim().slice(0, m.index).trim(), reuse } : { text: full.trim() };
+}
 
 const blockText = (content: unknown): string =>
   typeof content === 'string'
@@ -31,12 +41,12 @@ export function createAgent(canUseTool: CanUseTool) {
   return {
     stop: () => void current?.interrupt(),
     async run(prompt: string, onEvent: (e: AgentEvent) => void) {
-      current = query({
+      const q = (current = query({
         prompt,
         options: {
           systemPrompt,
           model: 'sonnet',
-          tools: ['Bash'],
+          tools: ['Bash', 'AskUserQuestion'],
           allowedTools,
           disallowedTools: ['mcp__claude-in-chrome'],
           permissionMode: 'default',
@@ -45,14 +55,14 @@ export function createAgent(canUseTool: CanUseTool) {
           settingSources: [],
           resume: sessionId,
         },
-      });
-      for await (const m of current) {
+      }));
+      for await (const m of q) {
         if ('session_id' in m && m.session_id) sessionId = m.session_id;
         if (m.type === 'assistant') {
           for (const b of m.message.content) {
-            if (b.type === 'text' && b.text.trim()) onEvent({ type: 'narration', text: b.text.trim() });
             if (b.type === 'tool_use' && b.name === 'Bash') {
-              onEvent({ type: 'step', id: b.id, command: String((b.input as { command?: string }).command ?? '') });
+              const input = b.input as { command?: string; description?: string };
+              onEvent({ type: 'step', id: b.id, command: String(input.command ?? ''), description: input.description });
             }
           }
         } else if (m.type === 'user' && Array.isArray(m.message.content)) {
@@ -62,10 +72,13 @@ export function createAgent(canUseTool: CanUseTool) {
             }
           }
         } else if (m.type === 'result') {
-          onEvent({ type: 'answer', text: m.subtype === 'success' ? m.result : 'stopped' });
+          if (m.subtype === 'success') onEvent({ type: 'answer', ...splitAnswer(m.result) });
+          else onEvent({ type: 'error', text: m.subtype.replace(/^error_/, '').replace(/_/g, ' ') });
+          // the result is the last thing that matters. the stream can take a while longer to close
+          onEvent({ type: 'done' });
         }
       }
-      current = undefined;
+      if (current === q) current = undefined;
     },
   };
 }
