@@ -12,7 +12,7 @@ name: `hey`, e.g. `hey count pods across all envs`. repo is `hey-shell` (~/hey-s
 - read-only commands run on their own. anything that changes state stops for approval
 - you can always see what a command acts on before it runs
 - the final command can be pulled into your shell, so you learn it instead of depending on the agent
-- opens with a hotkey (cmd+opt+a) from any terminal, exits back to the same prompt
+- opens with a hotkey (ctrl-x a) from the zsh line editor, exits back to the same prompt
 
 ## out of scope
 
@@ -80,7 +80,7 @@ a hand-rolled verb list / regex would be a worse copy of that, and it's kubectl/
 
 ### keys
 
-the ui was redesigned after the mvp (the plan is plans/2026-11-16-hey-ui-redesign.md in the combo folder). the keys, by mode:
+the ui was redesigned after the mvp: a scrolling log with a pinned dock (prompt, approval or question) and a status row, mouse optional. the keys, by mode:
 
 | mode | keys |
 |---|---|
@@ -131,7 +131,7 @@ system prompt, roughly:
 
 if `description` turns out unreliable, swap Bash for an in-process `run({ command, target, effect })` tool so the card always has a target slot. start with `description` since it's zero code.
 
-hotkey: zsh can't bind cmd. map cmd+opt+a in the terminal to send `0x18 0x61` (ctrl-x a), and the zle widget launches `hey`. iterm: settings > profiles > keys. warp: unclear, check.
+hotkey: ctrl-x a, bound by a zle widget that launches `hey`. most terminals can map a key to send `0x18 0x61`. a terminal without zle (its own input editor) just runs `hey` by hand.
 
 tab handoff: the tui writes the final command to a temp file on exit. the zsh widget reads it into `BUFFER` and calls `print -s`.
 

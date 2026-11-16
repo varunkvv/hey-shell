@@ -89,12 +89,21 @@ export const term = {
     write(ALT_ON + FOCUS_ON + (mouseOn ? MOUSE_ON : ''));
     // every way out. sigkill can't be caught
     process.on('exit', term.restore);
+    // on these paths the process is going away. ink's own exit hook may still be mid-unmount, and what it would write
+    // now (erasing its frame) belongs to the alt screen we just left, so stdout is muted
+    const leave = () => {
+      term.restore();
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+    };
     for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
-      process.on(sig, () => process.exit(code));
+      process.on(sig, () => {
+        leave();
+        process.exit(code);
+      });
     }
     // a stack trace written inside the alt screen would be lost
     const die = (err: unknown) => {
-      term.restore();
+      leave();
       console.error(err instanceof Error ? (err.stack ?? err.message) : err);
       process.exit(1);
     };

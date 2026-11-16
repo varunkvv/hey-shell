@@ -15,7 +15,7 @@ export function formatTranscript(
 
   return turns
     .map((t, i) => {
-      const ran = t.steps.filter((s) => s.status === 'ok' || s.status === 'failed' || s.status === 'declined');
+      const ran = t.steps.filter((s) => s.status === 'ok' || s.status === 'failed' || s.status === 'declined' || s.status === 'stopped');
       const shown = ran.slice(-MAX_COMMANDS);
       const out = [`${sgr('36', '›')} ${t.request}`];
       if (ran.length > shown.length) out.push(dim(`  +${ran.length - shown.length} earlier`));
@@ -24,8 +24,9 @@ export function formatTranscript(
         out.push(`  $ ${indent(s.command, '    ')}`);
         if (s.status === 'failed') {
           const last = [...s.output].reverse().find((l) => l.trim());
-          out.push(`    ${sgr('31', `✗ exit ${s.code ?? 1}`)}${last ? `  ${last.trim()}` : ''}`);
+          out.push(`    ${sgr('31', s.code === undefined ? '✗ failed' : `✗ exit ${s.code}`)}${last ? `  ${last.trim()}` : ''}`);
         } else if (s.status === 'declined') out.push(dim('    skipped'));
+        else if (s.status === 'stopped') out.push(dim('    stopped'));
       }
       if (t.answer) {
         const [first, ...rest] = t.answer.split('\n');

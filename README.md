@@ -20,7 +20,7 @@ add to ~/.zshrc
 then `hey <request>`, or `hey` for a prompt.
 
 hotkey: ctrl-x a opens the prompt from the zsh line editor. most terminals can map a key to send `\x18a`, point yours at that.
-ctrl-x a is a zle binding, so it needs zle. in a terminal with its own input editor (warp, iirc) just type `hey`. i did not check whether warp can bind a key to send text.
+ctrl-x a is a zle binding, so it needs zle. in warp, type `hey`.
 
 ## using it
 

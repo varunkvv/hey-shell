@@ -22,6 +22,8 @@ type Asked =
   | { kind: 'approval'; id: string; input: Record<string, unknown>; resolve: (r: PermissionResult) => void }
   | { kind: 'question'; id: string; input: Record<string, unknown>; resolve: (r: PermissionResult) => void; questions: Question[] };
 type Ask = { i: number; answers: Record<string, string>; index: number; typing?: Edit };
+type CardState = { key: string; edit?: Edit; scroll: number; ask: Ask };
+const freshCard = (key: string): CardState => ({ key, scroll: 0, ask: { i: 0, answers: {}, index: 0 } });
 
 const GUARD_MS = 400;
 const FLASH_MS = 2000;
@@ -63,10 +65,7 @@ function App() {
   const [scroll, setScroll] = useState({ stuck: true, top: 0, seen: 0 });
   const [reveal, setReveal] = useState(false);
   const [queue, setQueue] = useState<Asked[]>([]);
-  const [shownAt, setShownAt] = useState(0);
-  const [editBuf, setEditBuf] = useState<Edit>();
-  const [cmdScroll, setCmdScroll] = useState(0);
-  const [ask, setAsk] = useState<Ask>({ i: 0, answers: {}, index: 0 });
+  const [cardState, setCardState] = useState<CardState>(freshCard(''));
   const [flash, setFlash] = useState<{ text: string; until: number; step?: string; what?: string }>();
   const [mouse, setMouse] = useState(term.mouse);
   const [, tick] = useState(0);
@@ -76,8 +75,8 @@ function App() {
   // keys can arrive in a batch before the next render, so the buffers being typed into are also kept in refs
   const liveDraft = useRef(draft);
   liveDraft.current = draft;
-  const liveEdit = useRef(editBuf);
-  liveEdit.current = editBuf;
+  const liveEdit = useRef<Edit | undefined>(undefined);
+  const shown = useRef({ key: '', at: 0 });
   const stopping = useRef(false);
   const ended = useRef(new Set<number>());
   const answered = useRef(new Map<number, string>());
@@ -110,6 +109,8 @@ function App() {
   const agent = useMemo(() => createAgent(canUseTool), []);
 
   const onEvent = (id: number, e: AgentEvent) => {
+    // the stream can still throw after the result, and by then the turn is over
+    if (e.type !== 'done' && ended.current.has(id)) return;
     if (e.type === 'step') {
       const pending = latest.current.queue.some((a) => a.id === e.id);
       const step: Step = {
@@ -122,7 +123,8 @@ function App() {
       updateStep(e.id, (s) => ({
         ...s,
         ...out,
-        status: !e.isError ? 'ok' : out.code !== undefined ? 'failed' : 'declined',
+        // an error with no exit code is a denial when hey denied it, a stop when the user stopped the run, and a failure otherwise (a timeout, say)
+        status: !e.isError ? 'ok' : out.code !== undefined ? 'failed' : s.status === 'declined' || s.status === 'pending' ? 'declined' : stopping.current ? 'stopped' : 'failed',
         endedAt: Date.now(),
       }));
     } else if (e.type === 'answer') {
@@ -140,7 +142,7 @@ function App() {
       ...t,
       stopped,
       endedAt: Date.now(),
-      steps: t.steps.map((s) => (s.status === 'running' || s.status === 'pending' ? { ...s, status: 'declined' as const } : s)),
+      steps: t.steps.map((s) => (s.status === 'running' ? { ...s, status: 'stopped' as const } : s.status === 'pending' ? { ...s, status: 'declined' as const } : s)),
     }));
     setQueue([]);
     quitGuard.current = Date.now() + GUARD_MS;
@@ -157,6 +159,8 @@ function App() {
     setSelected(undefined);
     setScroll({ stuck: true, top: 0, seen: 0 });
     stopping.current = false;
+    // a double tap on enter must not read the empty prompt as quit
+    quitGuard.current = Date.now() + GUARD_MS;
     agent
       .run(text, (e) => onEvent(id, e))
       .catch((err) => onEvent(id, { type: 'error', text: err instanceof Error ? err.message : String(err) }))
@@ -170,11 +174,7 @@ function App() {
   // the card at the head of the queue is what the dock shows. each new one is guarded for 400ms and, if the user is away, announced
   const head = queue[0];
   useEffect(() => {
-    setEditBuf(undefined);
-    setCmdScroll(0);
-    setAsk({ i: 0, answers: {}, index: 0 });
     if (!head) return settled();
-    setShownAt(Date.now());
     const body = head.kind === 'question' ? (head.questions[0]?.question ?? 'a question') : String(head.input.description || head.input.command || 'approval');
     waiting(body);
   }, [head]);
@@ -182,7 +182,21 @@ function App() {
   useEffect(() => term.subscribe.input(settled), []);
 
   const now = Date.now();
-  const armed = now >= shownAt + GUARD_MS;
+  // per-card state belongs to the card, and is decided in the same render that first shows it, so the guard and the edit buffer are never left over from the previous card
+  const cardKey = head?.id ?? '';
+  if (shown.current.key !== cardKey) shown.current = { key: cardKey, at: now };
+  const cs = cardState.key === cardKey ? cardState : freshCard(cardKey);
+  const { edit: editBuf, scroll: cmdScroll, ask } = cs;
+  liveEdit.current = editBuf;
+  const patchCard = (f: (c: CardState) => Partial<CardState>) =>
+    setCardState((prev) => {
+      const base = prev.key === cardKey ? prev : freshCard(cardKey);
+      return { ...base, ...f(base) };
+    });
+  const setEditBuf = (b: Edit | undefined) => patchCard(() => ({ edit: b }));
+  const setCmdScroll = (f: (s: number) => number) => patchCard((c) => ({ scroll: f(c.scroll) }));
+  const setAsk = (a: Ask | ((a: Ask) => Ask)) => patchCard((c) => ({ ask: typeof a === 'function' ? a(c.ask) : a }));
+  const armed = now >= shown.current.at + GUARD_MS;
   const running = mode === 'running';
   const live = running || !!flash || (!!head && !armed);
   useEffect(() => {
@@ -429,7 +443,7 @@ function App() {
       const r = l.rows[row];
       if (!r) return;
       // the dock is guarded for a moment after a card appears, so a click aimed at the log cannot land on a button
-      if (row >= l.viewH && head && !(Date.now() >= shownAt + GUARD_MS)) return;
+      if (row >= l.viewH && head && !(Date.now() >= shown.current.at + GUARD_MS)) return;
       const hit = r.hits.find((h) => col >= h.x0 && col < h.x1)?.action ?? r.row;
       if (hit) act.current(hit, col);
     };

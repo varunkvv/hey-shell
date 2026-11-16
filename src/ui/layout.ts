@@ -15,7 +15,7 @@ export type Step = {
   command: string;
   description?: string;
   asked: boolean;
-  status: 'running' | 'pending' | 'ok' | 'failed' | 'declined';
+  status: 'running' | 'pending' | 'ok' | 'failed' | 'declined' | 'stopped';
   code?: number;
   output: string[];
   total: number;
@@ -146,7 +146,8 @@ const plural = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
 function result(s: Step, now: number): { text: string; style: Style } {
   if (s.status === 'running') return { text: secs(now - s.startedAt), style: { d: true } };
   if (s.status === 'declined') return { text: 'skipped', style: { d: true } };
-  if (s.status === 'failed') return { text: `exit ${s.code ?? 1}`, style: { fg: 'red' } };
+  if (s.status === 'stopped') return { text: 'stopped', style: { d: true } };
+  if (s.status === 'failed') return { text: s.code === undefined ? 'failed' : `exit ${s.code}`, style: { fg: 'red' } };
   if (s.total === 0) return { text: '', style: {} };
   if (s.total === 1) return { text: clip(s.output[0].trim(), 14), style: {} };
   return { text: `${n(s.total)} lines`, style: { d: true } };
