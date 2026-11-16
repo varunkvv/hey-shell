@@ -27,6 +27,10 @@ type CardState = { key: string; edit?: Edit; scroll: number; ask: Ask };
 const freshCard = (key: string): CardState => ({ key, scroll: 0, ask: { i: 0, answers: {}, index: 0 } });
 
 const GUARD_MS = 400;
+// a panel that was just answered stays for this long, so the next card swaps its text in and the log does not move
+const HOLD_MS = 300;
+// no card came: the dock collapses in one half step
+const COLLAPSE_MS = 100;
 const FLASH_MS = 2000;
 
 const historyFile = join(homedir(), '.hey_history');
@@ -49,7 +53,7 @@ const noKey: Key = {
   return: false, escape: false, ctrl: false, shift: false, tab: false, backspace: false, delete: false, meta: false,
   super: false, hyper: false, capsLock: false, numLock: false,
 };
-const keyFor = (k: KeyName): Key => ({ ...noKey, return: k === 'enter', escape: k === 'esc', tab: k === 'tab' });
+const keyFor = (k: KeyName): Key => ({ ...noKey, return: k === 'enter', escape: k === 'esc', tab: k === 'tab', upArrow: k === 'up', downArrow: k === 'down' });
 
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 const firstLine = (s: string) => s.split('\n')[0];
@@ -92,6 +96,8 @@ function App() {
   const answered = useRef(new Map<number, string>());
   const quitGuard = useRef(0);
   const lastKey = useRef(0);
+  const refusedAt = useRef(0);
+  const hold = useRef<{ card: Card; at: number; rows: number }>(undefined);
   const turnId = useRef(0);
   const histAt = useRef(history.length);
   const act = useRef<(a: Action, col: number, quiet: boolean) => void>(() => {});
@@ -127,6 +133,8 @@ function App() {
       const step: Step = {
         id: e.id, command: clean(e.command), description: e.description ? clean(e.description) : undefined, asked: pending,
         status: pending ? 'pending' : 'running', output: [], total: 0, startedAt: Date.now(), expanded: false,
+        // no card and auto-approve on means it ran on its own
+        auto: !pending && getAutoApprove(),
       };
       updateTurn(id, (t) => ({ ...t, steps: [...t.steps, step] }));
     } else if (e.type === 'stepDone') {
@@ -170,6 +178,7 @@ function App() {
     setSelected(undefined);
     setScroll({ stuck: true, top: 0, seen: 0 });
     stopping.current = false;
+    hold.current = undefined;
     // a double tap on enter must not read the empty prompt as quit
     quitGuard.current = Date.now() + GUARD_MS;
     agent
@@ -207,15 +216,18 @@ function App() {
   const setEditBuf = (b: Edit | undefined) => patchCard(() => ({ edit: b }));
   const setCmdScroll = (f: (s: number) => number) => patchCard((c) => ({ scroll: f(c.scroll) }));
   const setAsk = (a: Ask | ((a: Ask) => Ask)) => patchCard((c) => ({ ask: typeof a === 'function' ? a(c.ask) : a }));
-  // a card's action keys and clicks only count after 400ms with no input at all, so typing ahead while it appears cannot hit them
-  const armed = now >= shown.current.at + GUARD_MS && now >= lastKey.current + GUARD_MS;
+  // a card's action keys and clicks only count after 400ms with no input at all, so typing ahead while it appears cannot hit them.
+  // guard is how far along that is (0..1). it drives the fill of the run button, and any input pushes it back to 0
+  const guard = !head ? 1 : clamp((now - Math.max(shown.current.at, lastKey.current)) / GUARD_MS, 0, 1);
+  const armed = guard >= 1;
   const running = mode === 'running';
-  const live = running || !!flash || (!!head && !armed);
+  const guarding = !!head && !armed;
+  const live = running || !!flash || guarding;
   useEffect(() => {
     if (!live) return;
-    const t = setInterval(() => tick((n) => n + 1), 100);
+    const t = setInterval(() => tick((n) => n + 1), guarding ? 50 : 100);
     return () => clearInterval(t);
-  }, [live]);
+  }, [live, guarding]);
 
   const flashNow = flash && now < flash.until ? flash : undefined;
   const q = head?.kind === 'question' ? head.questions[ask.i] : undefined;
@@ -230,11 +242,18 @@ function App() {
   } else if (menu) {
     card = { kind: 'menu', title: 'model', index: menu.index, options: modelChoices(choice.model).map((c) => ({ label: c.value, description: c.hint, current: c.value === choice.model, danger: false })) };
   }
+  // the panel of the card that was just answered stays, inert, while the command runs. if no card follows, the dock shrinks in a step
+  const held = hold.current;
+  const sinceHold = held ? now - held.at : Infinity;
+  const holding = !head && !menu && running && sinceHold < HOLD_MS;
+  if (holding) card = held!.card;
+  const collapsing = !head && !menu && running && sinceHold >= HOLD_MS && sinceHold < HOLD_MS + COLLAPSE_MS;
   const lastTurn = turns.at(-1);
   const view: View = {
-    cols: columns, rows, now, frame: Math.floor(now / 100), turns, mode: effective, selected, scroll, reveal, draft, card, armed,
+    cols: columns, rows, now, frame: Math.floor(now / 100), turns, mode: effective, selected, scroll, reveal, draft, card, guard,
+    refused: !armed && refusedAt.current >= shown.current.at, holdAge: sinceHold, dockMin: collapsing ? Math.ceil((held!.rows + 3) / 2) : 0,
     flash: flashNow && { text: flashNow.text, step: flashNow.step, what: flashNow.what }, mouseOff: !mouse,
-    permission: getAutoApprove() ? 'auto-approve on' : 'auto-approve off', model: choice.model,
+    auto: getAutoApprove(), model: choice.model,
     canTab: !!lastTurn && !running && !!reuseOf(lastTurn),
   };
   const lay = layout(view);
@@ -305,19 +324,25 @@ function App() {
     toggle(sel);
   };
 
-  const resolveHead = (r: PermissionResult) => {
+  const resolveHead = (r: PermissionResult, outcome?: 'running' | 'skipped' | 'answered') => {
+    // keep the answered panel for a moment (see HOLD_MS)
+    if (card && outcome && (card.kind === 'approval' || card.kind === 'edit' || card.kind === 'question')) {
+      const l = laid.current!;
+      const done = card.kind === 'question' ? { ...card, done: outcome === 'skipped' ? ('skipped' as const) : ('answered' as const) } : { kind: 'approval' as const, description: card.description, command: card.kind === 'edit' ? card.buffer.text : card.command, scroll: 0, done: outcome === 'skipped' ? ('skipped' as const) : ('running' as const) };
+      hold.current = { card: done, at: Date.now(), rows: l.rows.length - l.viewH };
+    }
     head?.resolve(r);
     setQueue((qs) => qs.slice(1));
   };
   const runApproval = (command: string) => {
     if (head?.kind !== 'approval') return;
     updateStep(head.id, (s) => ({ ...s, command: clean(command), status: 'running', startedAt: Date.now() }));
-    resolveHead({ behavior: 'allow', updatedInput: { ...head.input, command } });
+    resolveHead({ behavior: 'allow', updatedInput: { ...head.input, command } }, 'running');
   };
   const skipApproval = (interrupt = false) => {
     if (head?.kind !== 'approval') return;
     updateStep(head.id, (s) => ({ ...s, status: 'declined' }));
-    resolveHead({ behavior: 'deny', message: 'the user declined to run this command', interrupt });
+    resolveHead({ behavior: 'deny', message: 'the user declined to run this command', interrupt }, interrupt ? undefined : 'skipped');
   };
   const stop = () => {
     stopping.current = true;
@@ -327,14 +352,41 @@ function App() {
     if (head?.kind !== 'question' || !q) return;
     const answers = { ...ask.answers, [q.question]: answer };
     if (ask.i + 1 < head.questions.length) setAsk({ i: ask.i + 1, answers, index: 0 });
-    else resolveHead({ behavior: 'allow', updatedInput: { ...head.input, answers } });
+    else resolveHead({ behavior: 'allow', updatedInput: { ...head.input, answers } }, 'answered');
   };
   const openMenu = () => {
     if (menu) return setMenu(undefined);
     setMenu({ index: Math.max(0, modelChoices(choice.model).findIndex((c) => c.value === choice.model)) });
   };
-  const toggleAutoApprove = () => {
-    setAutoApprove(!getAutoApprove());
+  // approvals already queued behind the one on screen (parallel commands) would show a card with the toggle on. they run now
+  const drain = () => {
+    const rest = latest.current.queue.filter((a) => a.kind === 'approval' && a !== head);
+    if (!rest.length) return;
+    for (const a of rest) {
+      updateStep(a.id, (s) => ({ ...s, status: 'running', startedAt: Date.now(), auto: true }));
+      a.resolve({ behavior: 'allow', updatedInput: a.input });
+    }
+    setQueue((qs) => qs.filter((a) => !rest.includes(a)));
+  };
+  // one path for shift-tab, the auto-approve chip on a card and the toggle in the status row: on a card it runs that command and turns
+  // auto-approve on (so "on" never has a card waiting), anywhere else it flips the toggle. only the approval card is guarded
+  const toggleAutoApprove = (quiet = true) => {
+    if (head?.kind === 'approval' && !editBuf) {
+      if (!quiet) return refuse();
+      if (cmdScroll < laid.current!.cmdMax) return;
+      setAutoApprove(true);
+      runApproval(String(head.input.command ?? ''));
+    } else if (head?.kind === 'approval' && editBuf) {
+      if (!editBuf.text.trim()) return;
+      setAutoApprove(true);
+      runApproval(editBuf.text);
+    } else setAutoApprove(!getAutoApprove());
+    if (getAutoApprove()) drain();
+    tick((n) => n + 1);
+  };
+  // a key or click that would have acted was swallowed by the guard: the run button says so
+  const refuse = () => {
+    refusedAt.current = Date.now();
     tick((n) => n + 1);
   };
   const choose = (i: number) => {
@@ -351,7 +403,7 @@ function App() {
     else setAsk({ ...ask, index: i, typing: edit.of('') });
   };
   const skipQuestion = (interrupt = false) => {
-    resolveHead({ behavior: 'deny', message: 'the user skipped the question. do not guess, say what you still need to know and stop', interrupt });
+    resolveHead({ behavior: 'deny', message: 'the user skipped the question. do not guess, say what you still need to know and stop', interrupt }, interrupt ? undefined : 'skipped');
   };
   const submit = (text: string) => {
     const value = text.trim();
@@ -380,10 +432,8 @@ function App() {
   handle.current = (input, key, passed) => {
     const quiet = passed ?? touch();
     if (key.ctrl && input === 't') return toggleMouse();
-    // auto-approve applies from the next command, so it can flip while a request runs. the model applies from the next request
-    if (effective === 'prompt' || effective === 'browse' || effective === 'running' || effective === 'menu') {
-      if (key.tab && key.shift) return toggleAutoApprove();
-    }
+    // shift-tab works everywhere, mid-run included. it applies from the next command. on a card it also runs that card
+    if (key.tab && key.shift) return toggleAutoApprove(quiet);
     if (effective === 'prompt' || effective === 'browse' || effective === 'menu') {
       if (key.ctrl && input === 'o') return openMenu();
     }
@@ -394,8 +444,9 @@ function App() {
       if (ctrlC) {
         skipApproval(true);
         stop();
-      } else if (!quiet) return;
-      else if (key.return && cmdScroll >= laid.current!.cmdMax) runApproval(String(head!.input.command ?? ''));
+      } else if (!quiet) {
+        if (key.return || key.escape || input === 'e') refuse();
+      } else if (key.return && cmdScroll >= laid.current!.cmdMax) runApproval(String(head!.input.command ?? ''));
       else if (input === 'e' && !key.ctrl && !key.meta) setEditBuf(edit.of(String(head!.input.command ?? '')));
       else if (key.escape) skipApproval();
     } else if (effective === 'edit') {
@@ -407,14 +458,16 @@ function App() {
       if (ctrlC) {
         skipQuestion(true);
         stop();
-      } else if (!ask.typing && !quiet) return;
-      else if (ask.typing) {
+      } else if (ask.typing) {
         if (key.escape) setAsk({ ...ask, typing: undefined });
         else if (key.return) ask.typing.text.trim() && answerQuestion(ask.typing.text.trim());
         else setAsk((a) => (a.typing ? { ...a, typing: editKey(a.typing, input, key) ?? a.typing } : a));
+        // moving the highlight answers nothing, so only enter and esc wait for the guard
       } else if (key.upArrow) setAsk({ ...ask, index: Math.max(0, ask.index - 1) });
       else if (key.downArrow) setAsk({ ...ask, index: Math.min(q!.options.length, ask.index + 1) });
-      else if (key.return) pickOption(ask.index);
+      else if (!quiet) {
+        if (key.return || key.escape) refuse();
+      } else if (key.return) pickOption(ask.index);
       else if (key.escape) skipQuestion();
     } else if (effective === 'menu') {
       const last = modelChoices(choice.model).length - 1;
@@ -476,7 +529,9 @@ function App() {
       case 'back': return setEditBuf(undefined);
       case 'runEdited': return editBuf?.text.trim() ? runApproval(editBuf.text) : undefined;
       case 'option': return pickOption(a.i);
-      case 'chip': return a.kind === 'mode' ? toggleAutoApprove() : openMenu();
+      case 'chip': return openMenu();
+      case 'auto': return toggleAutoApprove(quiet);
+      case 'newline': return typeEdit((b) => edit.insert(b, '\n'));
       case 'prompt':
         if (mode === 'browse') {
           setMode('prompt');
@@ -497,11 +552,13 @@ function App() {
       const r = l.rows[row];
       if (!r) return;
       const quiet = touch();
-      // buttons on an approval or question card are guarded, so a click aimed at the log cannot land on one
-      const guarded = row >= l.viewH && head && (effective === 'approval' || (effective === 'question' && !ask.typing));
-      if (guarded && !quiet) return;
       const hit = r.hits.find((h) => col >= h.x0 && col < h.x1)?.action ?? r.row;
-      if (hit) act.current(hit, col, quiet);
+      if (!hit) return;
+      // the buttons that decide a card wait for the guard, so a click aimed at the log cannot land on one. enter and esc buttons ('key')
+      // and the auto-approve toggle check it themselves. copy, scrolling and the model chip are harmless and never wait
+      const decides = hit.t === 'run' || hit.t === 'edit' || hit.t === 'skip' || hit.t === 'option';
+      if (decides && head && (effective === 'approval' || (effective === 'question' && !ask.typing)) && !quiet) return refuse();
+      act.current(hit, col, quiet);
     };
     const offPress = term.subscribe.press((p) => press(p));
     const offWheel = term.subscribe.wheel((dir) => scrollBy(dir * 3));
