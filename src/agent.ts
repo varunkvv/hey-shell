@@ -1,15 +1,27 @@
-import { query, type CanUseTool, type PermissionMode, type Query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync } from 'node:fs';
 
-// node prints warnings straight onto the screen hey draws on. the sdk raises one on every bypassPermissions run (canUseTool is
-// shadowed), and questions still reach hey there, so none of them are worth showing
+// node prints warnings straight onto the screen hey draws on, and none of them are worth showing
 process.removeAllListeners('warning');
 
 const systemPrompt = readFileSync(new URL('../prompt.md', import.meta.url), 'utf8');
 
-// hey has no command rules of its own. what runs, asks or is blocked comes from the permission mode, the rules and hooks in
-// claude code's managed policy and the user's ~/.claude settings, and claude code's own checks
-export type RunOptions = { permissionMode: PermissionMode; model: string };
+// hey has no command rules of its own. every Bash command reaches the approval callback, unless auto-approve is on. deny rules and
+// hooks in claude code's managed policy and the user's ~/.claude settings, and claude code's own checks, still apply before that
+export type RunOptions = { model: string };
+
+// off by default and never saved. read when a command arrives, so a flip applies to the next command of a run that is already going
+let autoApprove = false;
+export const setAutoApprove = (on: boolean) => void (autoApprove = on);
+export const getAutoApprove = () => autoApprove;
+
+// the user's settings allow Bash (and Bash(*)), which would run every command with no card. an 'ask' from a hook still ends in the
+// callback, loses only to a deny from a rule or another hook. a failing hook blocks the command, it does not let it run
+const askForBash = {
+  matcher: 'Bash',
+  onFailure: 'block' as const,
+  hooks: [async () => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'ask' as const } })],
+};
 
 export type AgentEvent =
   | { type: 'step'; id: string; command: string; description?: string }
@@ -34,13 +46,16 @@ const blockText = (content: unknown): string =>
       ? content.map((c) => (c?.type === 'text' ? c.text : '')).join('')
       : '';
 
-export function createAgent(canUseTool: CanUseTool) {
+export function createAgent(ask: CanUseTool) {
+  // questions always reach the user. only Bash commands are waved through
+  const canUseTool: CanUseTool = (tool, input, opts) =>
+    autoApprove && tool === 'Bash' ? Promise.resolve({ behavior: 'allow', updatedInput: input }) : ask(tool, input, opts);
   let sessionId: string | undefined;
   let current: Query | undefined;
 
   return {
     stop: () => void current?.interrupt(),
-    async run(prompt: string, onEvent: (e: AgentEvent) => void, { permissionMode, model }: RunOptions) {
+    async run(prompt: string, onEvent: (e: AgentEvent) => void, { model }: RunOptions) {
       const q = (current = query({
         prompt,
         options: {
@@ -50,8 +65,9 @@ export function createAgent(canUseTool: CanUseTool) {
           // `tools` only limits the built-in tools. servers claude code injects itself (claude in chrome, when
           // ~/.claude.json enables it) ignore strictMcpConfig, so this drops every mcp tool from the model
           disallowedTools: ['mcp__*'],
-          permissionMode,
-          allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
+          // set on purpose: the user's settings can carry a defaultMode of their own
+          permissionMode: 'default',
+          hooks: { PreToolUse: [askForBash] },
           canUseTool,
           strictMcpConfig: true,
           // managed policy is always read. 'user' adds the user's permission rules, hooks and plugins. project and

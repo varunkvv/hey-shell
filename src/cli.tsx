@@ -5,13 +5,13 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createAgent, type AgentEvent, type RunOptions } from './agent.js';
+import { createAgent, getAutoApprove, setAutoApprove, type AgentEvent, type RunOptions } from './agent.js';
 import { copy } from './ui/clipboard.js';
 import {
   layout, MAX_WIDTH, OUTPUT_CAP, reuseOf, selectables,
   type Action, type Card, type KeyName, type Mode, type Sel, type Step, type Turn, type View,
 } from './ui/layout.js';
-import { CYCLE, MODES, modelChoices, saveModel, startup } from './options.js';
+import { modelChoices, saveModel, startup } from './options.js';
 import { settled, waiting } from './ui/notify.js';
 import { Screen } from './ui/Screen.js';
 import { term } from './ui/terminal.js';
@@ -38,6 +38,7 @@ if ('error' in started) {
 }
 const initial = started.request;
 const start = started.run;
+setAutoApprove(started.autoApprove);
 
 let allTurns: Turn[] = [];
 let handoff = '';
@@ -50,7 +51,6 @@ const noKey: Key = {
 };
 const keyFor = (k: KeyName): Key => ({ ...noKey, return: k === 'enter', escape: k === 'esc', tab: k === 'tab' });
 
-const menuChoices = (kind: 'mode' | 'model', model = '') => (kind === 'mode' ? MODES : modelChoices(model));
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 const firstLine = (s: string) => s.split('\n')[0];
 
@@ -77,7 +77,7 @@ function App() {
   const [flash, setFlash] = useState<{ text: string; until: number; step?: string; what?: string }>();
   const [mouse, setMouse] = useState(term.mouse);
   const [choice, setChoice] = useState<RunOptions>(start);
-  const [menu, setMenu] = useState<{ kind: 'mode' | 'model'; index: number }>();
+  const [menu, setMenu] = useState<{ index: number }>();
   const [, tick] = useState(0);
 
   const latest = useRef({ turns, queue, selected });
@@ -228,14 +228,13 @@ function App() {
   } else if (head?.kind === 'question' && q) {
     card = { kind: 'question', n: ask.i + 1, total: head.questions.length, question: q.question, options: q.options, index: ask.index, typing: ask.typing };
   } else if (menu) {
-    const current = menu.kind === 'mode' ? choice.permissionMode : choice.model;
-    card = { kind: 'menu', title: menu.kind, index: menu.index, options: menuChoices(menu.kind, choice.model).map((c) => ({ label: c.value, description: c.hint, current: c.value === current, danger: c.value === 'bypassPermissions' })) };
+    card = { kind: 'menu', title: 'model', index: menu.index, options: modelChoices(choice.model).map((c) => ({ label: c.value, description: c.hint, current: c.value === choice.model, danger: false })) };
   }
   const lastTurn = turns.at(-1);
   const view: View = {
     cols: columns, rows, now, frame: Math.floor(now / 100), turns, mode: effective, selected, scroll, reveal, draft, card, armed,
     flash: flashNow && { text: flashNow.text, step: flashNow.step, what: flashNow.what }, mouseOff: !mouse,
-    permission: choice.permissionMode, model: choice.model,
+    permission: getAutoApprove() ? 'auto-approve on' : 'auto-approve off', model: choice.model,
     canTab: !!lastTurn && !running && !!reuseOf(lastTurn),
   };
   const lay = layout(view);
@@ -330,19 +329,19 @@ function App() {
     if (ask.i + 1 < head.questions.length) setAsk({ i: ask.i + 1, answers, index: 0 });
     else resolveHead({ behavior: 'allow', updatedInput: { ...head.input, answers } });
   };
-  const openMenu = (kind: 'mode' | 'model') => {
-    if (menu?.kind === kind) return setMenu(undefined);
-    const current = kind === 'mode' ? choice.permissionMode : choice.model;
-    setMenu({ kind, index: Math.max(0, menuChoices(kind, choice.model).findIndex((c) => c.value === current)) });
+  const openMenu = () => {
+    if (menu) return setMenu(undefined);
+    setMenu({ index: Math.max(0, modelChoices(choice.model).findIndex((c) => c.value === choice.model)) });
+  };
+  const toggleAutoApprove = () => {
+    setAutoApprove(!getAutoApprove());
+    tick((n) => n + 1);
   };
   const choose = (i: number) => {
-    const value = menu && menuChoices(menu.kind, choice.model)[i]?.value;
+    const value = menu && modelChoices(choice.model)[i]?.value;
     if (!menu || !value) return;
-    if (menu.kind === 'mode') setChoice((c) => ({ ...c, permissionMode: value as RunOptions['permissionMode'] }));
-    else {
-      setChoice((c) => ({ ...c, model: value }));
-      saveModel(value);
-    }
+    setChoice((c) => ({ ...c, model: value }));
+    saveModel(value);
     setMenu(undefined);
   };
   const pickOption = (i: number) => {
@@ -381,10 +380,12 @@ function App() {
   handle.current = (input, key, passed) => {
     const quiet = passed ?? touch();
     if (key.ctrl && input === 't') return toggleMouse();
-    // the next request picks these up. while one runs or a card is up they stay as they are
+    // auto-approve applies from the next command, so it can flip while a request runs. the model applies from the next request
+    if (effective === 'prompt' || effective === 'browse' || effective === 'running' || effective === 'menu') {
+      if (key.tab && key.shift) return toggleAutoApprove();
+    }
     if (effective === 'prompt' || effective === 'browse' || effective === 'menu') {
-      if (key.tab && key.shift) return setChoice((c) => ({ ...c, permissionMode: CYCLE[(CYCLE.indexOf(c.permissionMode) + 1) % CYCLE.length] }));
-      if (key.ctrl && input === 'o') return openMenu('model');
+      if (key.ctrl && input === 'o') return openMenu();
     }
     if (key.pageUp || key.pageDown) return scrollBy((key.pageUp ? -1 : 1) * Math.max(1, laid.current!.viewH - 1));
     const ctrlC = key.ctrl && input === 'c';
@@ -416,7 +417,7 @@ function App() {
       else if (key.return) pickOption(ask.index);
       else if (key.escape) skipQuestion();
     } else if (effective === 'menu') {
-      const last = menuChoices(menu!.kind, choice.model).length - 1;
+      const last = modelChoices(choice.model).length - 1;
       if (key.escape || ctrlC) setMenu(undefined);
       else if (key.upArrow) setMenu({ ...menu!, index: Math.max(0, menu!.index - 1) });
       else if (key.downArrow) setMenu({ ...menu!, index: Math.min(last, menu!.index + 1) });
@@ -475,7 +476,7 @@ function App() {
       case 'back': return setEditBuf(undefined);
       case 'runEdited': return editBuf?.text.trim() ? runApproval(editBuf.text) : undefined;
       case 'option': return pickOption(a.i);
-      case 'chip': return openMenu(a.kind);
+      case 'chip': return a.kind === 'mode' ? toggleAutoApprove() : openMenu();
       case 'prompt':
         if (mode === 'browse') {
           setMode('prompt');
