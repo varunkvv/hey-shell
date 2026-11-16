@@ -50,4 +50,4 @@ when hey stops for an approval, a question or the final answer and you are not l
 - not looking = the terminal reported focus-out (focus reporting). if no focus event has ever arrived in the session, it is a stop that waited 30s with no input
 - once any focus event has arrived, only focus counts and the 30s fallback is off. it never notifies while the terminal is focused
 
-read-only commands that skip approval are the `allowedTools` list in src/agent.ts.
+approval is claude code's own permission handling. plain read-only commands (ls, cat, grep, wc, find without -delete or -exec, git log) run without a card, anything that writes asks. the only addition is `kubectl get` and `kubectl config get-contexts` (`allowedTools` in src/agent.ts), which claude code does not know as read-only. put `--context` after the verb so it matches.

@@ -3,13 +3,11 @@ import { readFileSync } from 'node:fs';
 
 const systemPrompt = readFileSync(new URL('../prompt.md', import.meta.url), 'utf8');
 
-// read-only commands run without asking. everything else is left to the sdk's permission handling
-const allowedTools = [
-  'Bash(kubectl get:*)', 'Bash(kubectl --context * get:*)', 'Bash(kubectl config:*)',
-  'Bash(ls:*)', 'Bash(find:*)', 'Bash(wc:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Bash(head:*)',
-  'Bash(tail:*)', 'Bash(sort:*)', 'Bash(uniq:*)', 'Bash(echo:*)', 'Bash(pwd)',
-  'Bash(git status:*)', 'Bash(git log:*)', 'Bash(git diff:*)',
-];
+// claude code already runs plain read-only commands (ls, cat, grep, wc, find without -delete, git log...)
+// and asks for anything that writes. it does not know kubectl get, so that is all we add.
+// keep the verb first: `Bash(kubectl --context * get:*)` never matches, and `... get *` lets
+// `kubectl --context x label pod y get z` through
+const allowedTools = ['Bash(kubectl get:*)', 'Bash(kubectl config get-contexts:*)'];
 
 export type AgentEvent =
   | { type: 'step'; id: string; command: string; description?: string }
