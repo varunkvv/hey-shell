@@ -74,9 +74,9 @@ agent> _                                   enter on empty exits · tab reuse
 
 ### approvals
 
-no local classifier. which commands run on their own vs. stop for approval is left to the SDK's own permission handling (claude code already handles compound commands, redirects etc). `canUseTool` only fires when claude code would have asked, and it's just where the approval card renders. the rules and hooks that apply are claude code's managed policy and the user's `~/.claude` settings, and the permission mode (`--mode`, `HEY_PERMISSION_MODE`, the footer menu) is the only knob hey adds.
+no local classifier. hey does not decide which commands are risky. every Bash command reaches `canUseTool`, the place the approval card renders: an in-process PreToolUse hook answers `ask`, so the user's `Bash(*)` allow rule cannot skip it. the rules and hooks that apply first are claude code's managed policy and the user's `~/.claude` settings (deny still wins), and auto-approve (`--auto-approve`, `HEY_AUTO_APPROVE=1`, shift-tab) is the only knob hey adds. when it is on, `canUseTool` allows Bash straight away.
 
-a hand-rolled verb list / regex would be a worse copy of that, and it's kubectl/aws-specific by nature.
+a hand-rolled verb list / regex would be a worse copy of claude code's own checks, and it's kubectl/aws-specific by nature.
 
 ### keys
 
