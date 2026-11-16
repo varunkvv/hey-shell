@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from 'ink';
 import { useState } from 'react';
 
-export function LineInput({ initial = '', label, onSubmit, onCancel, onChange, history = [], active = true }: {
+export function LineInput({ initial = '', label, onSubmit, onCancel, onChange, history = [], active = true, placeholder }: {
   initial?: string;
   label: string;
   onSubmit: (value: string) => void;
@@ -9,6 +9,7 @@ export function LineInput({ initial = '', label, onSubmit, onCancel, onChange, h
   onChange?: (value: string) => void;
   history?: string[];
   active?: boolean;
+  placeholder?: string;
 }) {
   const [value, setValue] = useState(initial);
   const [hist, setHist] = useState(history.length);
@@ -39,9 +40,10 @@ export function LineInput({ initial = '', label, onSubmit, onCancel, onChange, h
 
   return (
     <Box>
-      <Text color="green">{label} </Text>
+      <Text bold>{label} </Text>
       <Text>{value}</Text>
       {active && <Text inverse> </Text>}
+      {!value && placeholder && <Text dimColor>{placeholder}</Text>}
     </Box>
   );
 }

@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from 'ink';
 import { useState } from 'react';
+import { Keys } from './Footer.js';
 import { LineInput } from './Prompt.js';
 
 export function Approval({ description, command, onRun, onSkip }: {
@@ -16,19 +17,31 @@ export function Approval({ description, command, onRun, onSkip }: {
     else if (key.escape) onSkip();
   }, { isActive: !editing });
 
+  // a yellow rule down the left edge marks the one thing the agent is waiting on. the command is never truncated, it wraps
   return (
-    <Box flexDirection="column" marginTop={1} marginLeft={2}>
-      <Text color="yellow">? {description ?? 'run this command'}</Text>
-      {editing ? (
-        <Box marginLeft={4} marginY={1}>
+    <Box
+      flexDirection="column"
+      marginTop={1}
+      marginLeft={2}
+      paddingLeft={1}
+      borderStyle="single"
+      borderColor="yellow"
+      borderTop={false}
+      borderRight={false}
+      borderBottom={false}
+    >
+      <Text color="yellow">needs approval</Text>
+      <Text bold>{description ?? 'run this command'}</Text>
+      <Box marginTop={1}>
+        {editing ? (
           <LineInput label="$" initial={command} onSubmit={onRun} onCancel={() => setEditing(false)} />
-        </Box>
-      ) : (
-        <Box marginLeft={4} marginY={1}>
-          <Text>{command}</Text>
-        </Box>
-      )}
-      <Text dimColor>{editing ? 'enter run · esc back' : 'enter run · e edit · esc skip'}</Text>
+        ) : (
+          <Text><Text dimColor>$ </Text>{command}</Text>
+        )}
+      </Box>
+      <Box marginTop={1}>
+        <Keys hints={editing ? [['enter', 'run'], ['esc', 'back']] : [['enter', 'run'], ['e', 'edit'], ['esc', 'skip']]} />
+      </Box>
     </Box>
   );
 }

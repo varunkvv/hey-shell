@@ -1,18 +1,16 @@
 #!/usr/bin/env node
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import { Box, render, Text, useApp, useInput } from 'ink';
+import { render, useApp, useInput } from 'ink';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createAgent, type AgentEvent } from './agent.js';
-import { Approval } from './ui/Approval.js';
-import { Footer } from './ui/Footer.js';
-import { LineInput } from './ui/Prompt.js';
-import { Steps, type Step } from './ui/Steps.js';
+import { Screen } from './ui/Screen.js';
+import type { Step } from './ui/Steps.js';
+import { formatTranscript, type Turn } from './ui/transcript.js';
 
 type Pending = { id: string; input: Record<string, unknown>; resolve: (r: PermissionResult) => void };
-type Turn = { request: string; commands: string[]; answer: string };
 
 const historyFile = join(homedir(), '.hey_history');
 const history = existsSync(historyFile) ? readFileSync(historyFile, 'utf8').split('\n').filter(Boolean) : [];
@@ -118,33 +116,33 @@ function App() {
   };
 
   return (
-    <Box flexDirection="column">
-      {request && <Text><Text color="green">agent&gt; </Text>{request}</Text>}
-      <Steps steps={steps} selected={selected} narration={phase === 'running' ? narration : ''} />
-      {phase === 'approval' && pending && (
-        <Approval
-          description={pending.input.description as string | undefined}
-          command={String(pending.input.command ?? '')}
-          onRun={(command) => resolve({ behavior: 'allow', updatedInput: { ...pending.input, command } }, command)}
-          onSkip={() => resolve({ behavior: 'deny', message: 'the user declined to run this command' })}
-        />
-      )}
-      {phase === 'input' && answer && <Text>{'  ' + answer}</Text>}
-      {phase === 'input' && (
-        <Box marginTop={1}>
-          <LineInput key={turn} label="agent>" onSubmit={submit} onChange={setDraft} history={history} />
-        </Box>
-      )}
-      <Footer hint={phase === 'running' ? 'esc stop · o output' : phase === 'input' ? 'enter on empty exits · tab reuse' : ''} />
-    </Box>
+    <Screen
+      phase={phase}
+      request={request}
+      steps={steps}
+      selected={selected}
+      narration={narration}
+      answer={answer}
+      approval={
+        pending && {
+          description: pending.input.description as string | undefined,
+          command: String(pending.input.command ?? ''),
+          onRun: (command) => resolve({ behavior: 'allow', updatedInput: { ...pending.input, command } }, command),
+          onSkip: () => resolve({ behavior: 'deny', message: 'the user declined to run this command' }),
+        }
+      }
+      inputKey={turn}
+      hasDraft={!!draft}
+      canReuse={!!handoff}
+      history={history}
+      onSubmit={submit}
+      onDraft={setDraft}
+    />
   );
 }
 
 const app = render(<App />, { alternateScreen: true });
 await app.waitUntilExit();
-for (const t of transcript) {
-  for (const c of t.commands) console.log(`$ ${c}`);
-  if (t.answer) console.log(t.answer);
-}
+if (transcript.length) console.log(formatTranscript(transcript) + '\n');
 if (process.env.HEY_OUT && picked) writeFileSync(process.env.HEY_OUT, handoff);
 process.exit(0);
