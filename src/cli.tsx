@@ -81,10 +81,11 @@ function App() {
   const ended = useRef(new Set<number>());
   const answered = useRef(new Map<number, string>());
   const quitGuard = useRef(0);
+  const lastKey = useRef(0);
   const turnId = useRef(0);
   const histAt = useRef(history.length);
-  const act = useRef<(a: Action, col: number) => void>(() => {});
-  const handle = useRef<(input: string, key: Key) => void>(() => {});
+  const act = useRef<(a: Action, col: number, quiet: boolean) => void>(() => {});
+  const handle = useRef<(input: string, key: Key, quiet?: boolean) => void>(() => {});
   const laid = useRef<ReturnType<typeof layout>>(undefined);
 
   const updateTurn = (id: number, f: (t: Turn) => Turn) => setTurns((ts) => ts.map((t) => (t.id === id ? f(t) : t)));
@@ -196,7 +197,8 @@ function App() {
   const setEditBuf = (b: Edit | undefined) => patchCard(() => ({ edit: b }));
   const setCmdScroll = (f: (s: number) => number) => patchCard((c) => ({ scroll: f(c.scroll) }));
   const setAsk = (a: Ask | ((a: Ask) => Ask)) => patchCard((c) => ({ ask: typeof a === 'function' ? a(c.ask) : a }));
-  const armed = now >= shown.current.at + GUARD_MS;
+  // a card's action keys and clicks only count after 400ms with no input at all, so typing ahead while it appears cannot hit them
+  const armed = now >= shown.current.at + GUARD_MS && now >= lastKey.current + GUARD_MS;
   const running = mode === 'running';
   const live = running || !!flash || (!!head && !armed);
   useEffect(() => {
@@ -337,8 +339,17 @@ function App() {
 
   const typeDraft = (f: (d: Edit) => Edit) => setDraft((liveDraft.current = f(liveDraft.current)));
   const typeEdit = (f: (b: Edit) => Edit) => liveEdit.current && setEditBuf((liveEdit.current = f(liveEdit.current)));
+  // true when the card has been up for 400ms and nothing was typed or clicked for 400ms. every input restarts the guard
+  const touch = () => {
+    const at = Date.now();
+    const quiet = at >= shown.current.at + GUARD_MS && at >= lastKey.current + GUARD_MS;
+    lastKey.current = at;
+    if (head) tick((n) => n + 1);
+    return quiet;
+  };
   const hasSteps = turns.some((t) => t.steps.length);
-  handle.current = (input, key) => {
+  handle.current = (input, key, passed) => {
+    const quiet = passed ?? touch();
     if (key.ctrl && input === 't') return toggleMouse();
     if (key.pageUp || key.pageDown) return scrollBy((key.pageUp ? -1 : 1) * Math.max(1, laid.current!.viewH - 1));
     const ctrlC = key.ctrl && input === 'c';
@@ -347,7 +358,7 @@ function App() {
       if (ctrlC) {
         skipApproval(true);
         stop();
-      } else if (!armed) return;
+      } else if (!quiet) return;
       else if (key.return && cmdScroll >= laid.current!.cmdMax) runApproval(String(head!.input.command ?? ''));
       else if (input === 'e' && !key.ctrl && !key.meta) setEditBuf(edit.of(String(head!.input.command ?? '')));
       else if (key.escape) skipApproval();
@@ -360,7 +371,7 @@ function App() {
       if (ctrlC) {
         skipQuestion(true);
         stop();
-      } else if (!armed) return;
+      } else if (!ask.typing && !quiet) return;
       else if (ask.typing) {
         if (key.escape) setAsk({ ...ask, typing: undefined });
         else if (key.return) ask.typing.text.trim() && answerQuestion(ask.typing.text.trim());
@@ -411,12 +422,12 @@ function App() {
   };
   useInput((input, key) => handle.current(input, key));
 
-  act.current = (a, col) => {
+  act.current = (a, col, quiet) => {
     switch (a.t) {
       case 'step': return pick({ kind: 'step', id: a.id });
       case 'fold': return pick({ kind: 'fold', turn: a.turn });
       case 'copy': return doCopy(a.what, a.step, a.turn);
-      case 'key': return handle.current('', keyFor(a.key));
+      case 'key': return handle.current('', keyFor(a.key), quiet);
       case 'run': return runApproval(String(head?.input.command ?? ''));
       case 'edit': return setEditBuf(edit.of(String(head?.input.command ?? '')));
       case 'skip': return skipApproval();
@@ -442,10 +453,12 @@ function App() {
       const l = laid.current!;
       const r = l.rows[row];
       if (!r) return;
-      // the dock is guarded for a moment after a card appears, so a click aimed at the log cannot land on a button
-      if (row >= l.viewH && head && !(Date.now() >= shown.current.at + GUARD_MS)) return;
+      const quiet = touch();
+      // buttons on an approval or question card are guarded, so a click aimed at the log cannot land on one
+      const guarded = row >= l.viewH && head && (effective === 'approval' || (effective === 'question' && !ask.typing));
+      if (guarded && !quiet) return;
       const hit = r.hits.find((h) => col >= h.x0 && col < h.x1)?.action ?? r.row;
-      if (hit) act.current(hit, col);
+      if (hit) act.current(hit, col, quiet);
     };
     const offPress = term.subscribe.press((p) => press(p));
     const offWheel = term.subscribe.wheel((dir) => scrollBy(dir * 3));

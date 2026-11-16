@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { clean } from './text.js';
 import { term } from './terminal.js';
 
-const FALLBACK_MS = 5000;
+const FALLBACK_MS = 30_000;
 
 // the text goes in as an argv item and is never parsed as applescript, so quotes and backslashes in model text are inert.
 // `--` keeps a message starting with "-" from being read as an osascript option
@@ -15,7 +15,8 @@ function ring(body: string) {
 let cancel = () => {};
 
 // call when hey stops and waits for the user. rings once when they are not looking:
-// the terminal reported focus-out, or it never reports focus and nothing was typed for 5s. never while focused
+// the terminal reported focus-out, or no focus event has ever arrived in this session and nothing was typed for 30s.
+// once any focus event has arrived, only focus counts. never while focused
 export function waiting(body: string) {
   cancel();
   let sent = false;

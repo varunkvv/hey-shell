@@ -26,7 +26,7 @@ ctrl-x a is a zle binding, so it needs zle. in warp, type `hey`.
 
 - a step is one command. click it (or up / down then enter) to open its output, click `copy command` or `copy output` to copy exactly that
 - the answer has a `copy` link. the reuse command under it has `copy` and `tab`
-- approval stops show the model's description and the exact command. `run` ignores clicks and enter for the first 400ms so a stray tap can't run it
+- approval stops show the model's description and the exact command. the card's keys and buttons only count after 400ms with no input at all (any keypress or click restarts that), so typing ahead while it appears can't run or edit anything. `run` is dim until then
 - a question stop shows the options as buttons. pick one, or choose `other` and type an answer
 - the log scrolls with the wheel, pgup / pgdn or the scrollbar. a long output is just more rows, with a sticky header for the step it belongs to
 
@@ -47,7 +47,7 @@ tab to shell puts the command in the zsh buffer and history, and also copies it 
 
 when hey stops for an approval, a question or the final answer and you are not looking, it rings the bell and posts a macos notification (`osascript`).
 
-- not looking = the terminal reported focus-out (focus reporting). if the terminal never reports focus, it is a stop that waited 5s with no input
-- once the terminal has reported focus-in it never notifies while focused. before it reports anything (a terminal that supports focus reporting but has not changed focus yet counts), the 5s fallback applies
+- not looking = the terminal reported focus-out (focus reporting). if no focus event has ever arrived in the session, it is a stop that waited 30s with no input
+- once any focus event has arrived, only focus counts and the 30s fallback is off. it never notifies while the terminal is focused
 
 read-only commands that skip approval are the `allowedTools` list in src/agent.ts.

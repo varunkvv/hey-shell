@@ -465,7 +465,7 @@ function dockQuestion(v: View, w: number, c: Extract<Card, { kind: 'question' }>
     b.add('   ');
     button(b, 'back', 'esc', {}, { t: 'key', key: 'esc' });
   } else {
-    button(b, 'answer', 'enter', { b: true, inv: true }, { t: 'key', key: 'enter' });
+    button(b, 'answer', 'enter', v.armed ? { b: true, inv: true } : { d: true }, { t: 'key', key: 'enter' });
     b.add('   ');
     button(b, 'skip', 'esc', {}, { t: 'key', key: 'esc' });
     const hint = '↑↓ choose';
