@@ -32,9 +32,9 @@ alt-screen, so any step can be expanded in place. on exit the one-line answer (a
 agent> count pods across all envs
 
   ✓ kubectl config get-contexts -o name                      4 contexts
-  ✓ kubectl --context olaf get pods -A --no-headers | wc -l       312
-  ✓ kubectl --context sweeney get pods -A --no-headers | wc -l    290
-  ⠋ kubectl --context us01 get pods -A --no-headers | wc -l
+  ✓ kubectl --context dev get pods -A --no-headers | wc -l        312
+  ✓ kubectl --context staging get pods -A --no-headers | wc -l    290
+  ⠋ kubectl --context prod-us get pods -A --no-headers | wc -l
 
   esc stop · o output
 ```
@@ -47,7 +47,7 @@ agent> count pods across all envs
 ### done
 
 ```
-  1,284 pods   olaf 312 · sweeney 290 · us01 512 · d-use-1 170
+  1,284 pods   dev 312 · staging 290 · prod-us 512 · prod-eu 170
 
 agent> _                                   enter on empty exits · tab reuse
 ```
@@ -126,7 +126,7 @@ system prompt, roughly:
 - you're in zsh on macos. use bash for everything
 - for k8s, list contexts first and loop. never assume an env. pass `--context` per command, never `use-context`
 - for bulk changes, list what will change before changing it
-- when a command changes something, the `description` says what it acts on and where ("delete pod api-7f in us01", "rename 12 files in ~/repos/reports")
+- when a command changes something, the `description` says what it acts on and where ("delete pod api-7f in prod-us", "rename 12 files in ~/repos/reports")
 - answer with the result only. a number, a short table, or what changed
 
 if `description` turns out unreliable, swap Bash for an in-process `run({ command, target, effect })` tool so the card always has a target slot. start with `description` since it's zero code.
@@ -146,7 +146,7 @@ tab handoff: the tui writes the final command to a temp file on exit. the zsh wi
 
 ## prior art
 
-- the grove `shell-agent` branch (worktree `worktrees/session-manager-shell-agent`, `tools/shell-agent/`) has the no-code version: a zsh function that runs `claude --tools Bash,Read --allowedTools <read-only list> --append-system-prompt-file prompt.md`. worth keeping as the fallback and reusing its prompt
+- an earlier no-code version was a zsh function that runs `claude --tools Bash,Read --allowedTools <read-only list> --append-system-prompt-file prompt.md`. worth keeping as the fallback and reusing its prompt
 - warp ai, shell-gpt, aichat do nl -> command. none of them make the run itself the ui
 
 ## open questions

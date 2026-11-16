@@ -30,7 +30,7 @@ ctrl-x a is a zle binding, so it needs zle. in warp, type `hey`.
 
 - a step is one command. click it (or up / down then enter) to open its output, click `copy command` or `copy output` to copy exactly that
 - the answer has a `copy` link. the reuse command under it has `copy` and `tab`
-- approval stops show the model's description and the exact command. the card's keys and buttons only count after 400ms with no input at all (any keypress or click restarts that), so typing ahead while it appears can't run or edit anything. `run` is dim until then
+- approval stops show the model's description and the exact command. the card's keys and buttons only count after 400ms with no input at all (any keypress or click restarts that), so typing ahead while it appears can't run or edit anything. the `run` pill fills up over that time, and a key pressed too early resets the fill and shows `wait…`
 - a question stop shows the options as buttons. pick one, or choose `other` and type an answer
 - the log scrolls with the wheel, pgup / pgdn or the scrollbar. a long output is just more rows, with a sticky header for the step it belongs to
 
