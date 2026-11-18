@@ -59,7 +59,7 @@ export type Action =
   | { t: 'chip'; kind: 'model' }
   | { t: 'auto' }
   | { t: 'newline' }
-  | { t: 'prompt'; base: number }
+  | { t: 'prompt'; start: number; end: number }
   | { t: 'editAt'; start: number; end: number; x: number }
   | { t: 'page'; dir: 1 | -1 }
   | { t: 'bottom' }
@@ -440,38 +440,47 @@ function button(l: Line, parts: [string, Style?][], look: Look, fill: number, ac
 const pillParts = (label: string, hint: string, width = 5): [string, Style?][] => [[' '], [label, { b: true }], ['  '], [hint.padEnd(width)], [' ']];
 const chipParts = (label: string, hint: string): [string, Style?][] => [[' '], [label], ['  '], [hint, { d: true }], [' ']];
 
-function promptRow(v: View, w: number, focused: boolean, empty: boolean): Row {
-  const l = line();
-  l.add('›', { fg: 'accent', b: true }).add(' ');
-  l.row = { t: 'prompt', base: 0 };
-  const room = w - 3;
+// the prompt wraps and grows with the text. it stops at a third of the screen and then scrolls to keep the cursor row in view
+export const promptRanges = (text: string, w: number) => wrap(text, Math.max(1, w - 3 - 1));
+export const promptMax = (rows: number) => Math.max(1, Math.min(12, Math.floor(rows / 3)));
+
+function promptRows(v: View, w: number, focused: boolean, empty: boolean): Row[] {
   const { text, cur } = v.draft;
   if (!text) {
+    const l = line();
+    l.add('›', { fg: 'accent', b: true }).add(' ');
+    l.row = { t: 'prompt', start: 0, end: 0 };
     const hint = empty ? 'ask for something in plain english' : 'follow up';
     if (focused) l.add(hint[0], { inv: true }).add(hint.slice(1), { d: true, i: true });
     else l.add(hint, { d: true, i: true });
-    return l.done();
+    return [l.done()];
   }
-  // scroll sideways so the cursor stays on screen
-  let start = 0;
-  while (cells(text.slice(start, cur)) > room - 1) start++;
-  const shown = text.slice(start);
-  l.row = { t: 'prompt', base: start };
-  const at = cur - start;
-  const pre = shown.slice(0, at);
-  const ch = firstGrapheme(shown.slice(at));
-  const post = shown.slice(at + ch.length);
-  l.add(pre);
-  if (focused) l.add(ch || ' ', { inv: true });
-  else l.add(ch);
-  l.add(clip(post, Math.max(0, room - cells(pre) - 1)));
-  return l.done();
+  const ranges = promptRanges(text, w);
+  const own = ranges.findIndex((r, i) => cur < (ranges[i + 1]?.start ?? Infinity) || i === ranges.length - 1);
+  const visible = Math.min(ranges.length, promptMax(v.rows));
+  const from = Math.max(0, Math.min(own - visible + 1 + Math.floor(visible / 2), ranges.length - visible));
+  const out: Row[] = [];
+  for (let i = from; i < from + visible; i++) {
+    const rg = ranges[i];
+    const l = line();
+    if (i === 0) l.add('›', { fg: 'accent', b: true }).add(' ');
+    else l.add('  ');
+    l.row = { t: 'prompt', start: rg.start, end: rg.end };
+    if (focused && i === own) {
+      const at = Math.min(cur, rg.end);
+      const tail = text.slice(at, rg.end);
+      const ch = firstGrapheme(tail);
+      l.add(text.slice(rg.start, at)).add(ch || ' ', { inv: true }).add(tail.slice(ch.length));
+    } else l.add(text.slice(rg.start, rg.end));
+    out.push(l.done());
+  }
+  return out;
 }
 
 function dockPrompt(v: View, w: number): Row[] {
   const rows = [rule(w, undefined, 'badge', v.auto)];
   const focused = v.mode === 'prompt';
-  rows.push(promptRow(v, w, focused, !v.turns.length));
+  rows.push(...promptRows(v, w, focused, !v.turns.length));
   const hints: Hint[] = [];
   if (!v.turns.length) hints.push(key('esc', 'quit'));
   else if (v.mode === 'browse') {

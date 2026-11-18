@@ -8,14 +8,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createAgent, getAutoApprove, setAutoApprove, type AgentEvent, type RunOptions } from './agent.js';
 import { copy } from './ui/clipboard.js';
 import {
-  layout, MAX_WIDTH, OUTPUT_CAP, reuseOf, selectables,
+  layout, MAX_WIDTH, OUTPUT_CAP, promptRanges, reuseOf, selectables,
   type Action, type Card, type KeyName, type Mode, type Sel, type Step, type Turn, type View,
 } from './ui/layout.js';
 import { modelChoices, saveModel, startup } from './options.js';
 import { settled, waiting } from './ui/notify.js';
 import { Screen } from './ui/Screen.js';
 import { term } from './ui/terminal.js';
-import { clean, edit, editKey, offsetAt, type Edit } from './ui/text.js';
+import { cells, clean, edit, editKey, offsetAt, type Edit } from './ui/text.js';
 import { formatTranscript } from './ui/transcript.js';
 
 type Question = { question: string; options: { label: string; description: string }[] };
@@ -497,8 +497,13 @@ function App() {
       const text = liveDraft.current.text;
       if (ctrlC) text ? typeDraft(() => edit.of('')) : finish();
       else if (key.ctrl && input === 'd' && !text) finish();
-      else if (key.return) submit(text);
-      else if (key.tab) !text && lastTurn && toShell(reuseOf(lastTurn));
+      else if (input === '\n' || (key.meta && key.return)) typeDraft((d) => edit.insert(d, '\n'));
+      else if (key.return) {
+        // a trailing backslash continues the line, like a shell
+        const d = liveDraft.current;
+        if (d.cur === d.text.length && d.text.endsWith('\\')) typeDraft((x) => edit.insert(edit.backspace(x), '\n'));
+        else submit(text);
+      } else if (key.tab) !text && lastTurn && toShell(reuseOf(lastTurn));
       else if (key.escape) {
         if (!hasSteps) finish();
         else {
@@ -506,12 +511,25 @@ function App() {
           setSelected(undefined);
         }
       } else if (key.upArrow || key.downArrow) {
-        const i = clamp(histAt.current + (key.upArrow ? -1 : 1), 0, history.length);
-        histAt.current = i;
-        typeDraft(() => edit.of(history[i] ?? ''));
+        // inside a multi-row draft the arrows move the cursor. history only from the first row (up) or the last (down)
+        const d = liveDraft.current;
+        const rs = promptRanges(d.text, Math.min(columns, MAX_WIDTH));
+        const at = Math.max(0, rs.findIndex((r, i) => d.cur < (rs[i + 1]?.start ?? Infinity) || i === rs.length - 1));
+        const to = at + (key.upArrow ? -1 : 1);
+        if (d.text && rs[to]) {
+          const col = cells(d.text.slice(rs[at].start, Math.min(d.cur, rs[at].end)));
+          typeDraft(() => ({ text: d.text, cur: rs[to].start + offsetAt(d.text.slice(rs[to].start, rs[to].end), col) }));
+        } else if (!d.text || (histAt.current !== history.length && at === (key.upArrow ? 0 : rs.length - 1)) || (rs.length === 1 && histAt.current === history.length && key.upArrow)) {
+          const i = clamp(histAt.current + (key.upArrow ? -1 : 1), 0, history.length);
+          histAt.current = i;
+          typeDraft(() => edit.of(history[i] ?? ''));
+        }
+      } else if (!key.ctrl && !key.meta && input.length > 1 && /[\r\n]/.test(input.replace(/[\r\n]+$/, ''))) {
+        // a pasted block with line breaks inside it goes in whole, so a long message is never sent half typed
+        typeDraft((d) => editKey(d, input.replace(/[\r\n]+$/, ''), key, true) ?? d);
       } else if (!key.ctrl && !key.meta && input.length > 1 && /[\r\n]$/.test(input)) {
         // a paste or fast typing can deliver text and enter in one chunk
-        submit(edit.insert(liveDraft.current, input.replace(/[\r\n]+$/, '').replace(/[\r\n]+/g, ' ')).text);
+        submit(edit.insert(liveDraft.current, input.replace(/[\r\n]+$/, '')).text);
       } else typeDraft((d) => editKey(d, input, key) ?? d);
     }
   };
@@ -537,7 +555,7 @@ function App() {
           setMode('prompt');
           setSelected(undefined);
         }
-        if (mode !== 'running') setDraft({ ...draft, cur: a.base + offsetAt(draft.text.slice(a.base), col - 2) });
+        if (mode !== 'running') setDraft({ ...draft, cur: a.start + offsetAt(draft.text.slice(a.start, a.end), col - 2) });
         return;
       case 'editAt': return editBuf && setEditBuf({ ...editBuf, cur: a.start + offsetAt(editBuf.text.slice(a.start, a.end), col - a.x) });
       case 'page': return scrollBy(a.dir * Math.max(1, laid.current!.viewH - 1));
